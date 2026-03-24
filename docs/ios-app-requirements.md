@@ -9,12 +9,12 @@ Tasarım temiz ve sade olmalı.
 ## Kullanıcı Akışı ve İşlevler
 
 1. ✅ Kullanıcılar uygulamaya giriş yapabilmeli
-2. ❌ Giriş yapıldıktan sonra erişim yetkisi olan tüm projeler listelenmeli
-3. ❌ Kullanıcı çalışmak istediği projeyi seçebilmeli
-4. ❌ Masaüstü uygulamasında başlatılan anketler (örneğin Relevé Anketi) kullanıcı mobil uygulamaya giriş yaptığında hemen erişilebilir olmalı
-5. ❌ Kullanıcılar tek bir saha ziyaretinde birden fazla anket yapabilmeli, bunun için net bir "Başka anket ekle" seçeneği olmalı
-6. ❌ Tamamlanan anketler özel bir "Tamamlanan Anketler" sekmesine taşınmalı
-7. ❌ Kullanıcılar anket verilerini doğrudan uygulama içerisinde düzenleyebilmeli veya güncelleyebilmeli
+2. ✅ Giriş yapıldıktan sonra erişim yetkisi olan tüm projeler listelenmeli
+3. ✅ Kullanıcı çalışmak istediği projeyi seçebilmeli
+4. ✅ Masaüstü uygulamasında başlatılan anketler (örneğin Relevé Anketi) kullanıcı mobil uygulamaya giriş yaptığında hemen erişilebilir olmalı
+5. ✅ Kullanıcılar tek bir saha ziyaretinde birden fazla anket yapabilmeli, bunun için net bir "Başka anket ekle" seçeneği olmalı
+6. ✅ Tamamlanan anketler özel bir "Tamamlanan Anketler" sekmesine taşınmalı
+7. ✅ Kullanıcılar anket verilerini doğrudan uygulama içerisinde düzenleyebilmeli veya güncelleyebilmeli
 
 ## Veri Erişimi ve Giriş
 
@@ -29,6 +29,12 @@ Tasarım temiz ve sade olmalı.
 
 11. ❌ Tüm anket verileri ve fotoğraflar hücresel ağ veya Wi-Fi bağlantısı olmasa bile uygulama içerisinde otomatik olarak yerel kayıt edilmeli ve veri kalıcılığı sağlanmalı
 12. ❌ Hücresel ağ ve/veya Wi-Fi erişimi yeniden sağlandığında yerel olarak kaydedilmiş tüm veriler otomatik olarak senkronize edilmeli; hem mobil uygulamadaki ilgili projeye hem de masaüstü uygulamasındaki ilgili projeye kaydedilmeli
+
+---
+
+> Yukarıdaki maddeler (1-12) orijinal müşteri feedback'inden alınmıştır. Aşağıdaki notlar, eksikler ve başlama adımları ekibimizin teknik analizi, Survey123 testleri ve mevcut Dulra Web projesinin incelenmesi sonucunda eklenmiştir.
+
+---
 
 ## NOTLARIM
 
@@ -103,13 +109,13 @@ Bu adımlar mevcut Next.js projesinde yapılacak. Mobil uygulama web'deki şablo
 
 11.) ✅ **Login ekranı** — Supabase Auth ile email/şifre girişi. Token'ı `expo-secure-store`'da sakla. Oturum kontrolü ile otomatik yönlendirme.
 
-12.) ❌ **Proje listesi ekranı** — Supabase'den kullanıcının erişim yetkisi olan projeleri çek ve listele. Proje adı, durumu, son güncelleme tarihi gösterilecek.
+12.) ✅ **Proje listesi ekranı** — Supabase'den kullanıcının erişim yetkisi olan projeleri çek ve listele. Proje adı, durumu, son güncelleme tarihi gösterilecek.
 
-13.) ❌ **Proje detay / anket listesi ekranı** — Seçilen projeye ait anketleri listele. İki sekme: "Aktif Anketler" ve "Tamamlanan Anketler". "Yeni Anket Başlat" butonu: survey tipi seçtirip Supabase'den o tipin JSON şablonunu çeker.
+13.) ✅ **Proje detay / anket listesi ekranı** — Seçilen projeye ait anketleri listele. İki sekme: "Aktif Anketler" ve "Tamamlanan Anketler". "Yeni Anket Başlat" butonu: survey tipi seçtirip Supabase'den o tipin JSON şablonunu çeker.
 
 ### Faz 4 — Dinamik Form Sistemi (Mobil)
 
-14.) ❌ **Mobil dinamik form renderer yaz** — Web'deki `dynamic-field-renderer.tsx` mantığının React Native versiyonu. JSON şablonundaki her alan tipine göre doğru native bileşeni çiz: text → TextInput, number → sayı klavyeli TextInput, select → Picker veya BottomSheet, boolean → Switch, date → DateTimePicker, photo → kamera butonu, gps → otomatik konum alma.
+14.) ✅ **Mobil dinamik form renderer yaz** — Web'deki `dynamic-field-renderer.tsx` mantığının React Native versiyonu. JSON şablonundaki her alan tipine göre doğru native bileşeni çiz: text → TextInput, number → sayı klavyeli TextInput, select → Picker veya BottomSheet, boolean → Switch, date → DateTimePicker, photo → kamera butonu, gps → otomatik konum alma.
 
 15.) ❌ **Tekrarlanabilir bölüm desteği** — `repeatable: true` olan bölümler için "Yeni gözlem ekle" butonu. Her kopya ayrı veri tutar.
 

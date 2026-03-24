@@ -49,11 +49,35 @@ export default function RootLayout() {
 
   return (
     <View style={{ flex: 1 }}>
-      <Stack screenOptions={{ headerShown: false, animation: "fade" }}>
-        <Stack.Screen name="(auth)" />
-        <Stack.Screen name="(tabs)" />
-        <Stack.Screen name="project/[id]" options={{ headerShown: true, title: "Project", headerBackTitle: "Projects" }} />
-        <Stack.Screen name="survey/[id]" options={{ headerShown: true, title: "Survey", headerBackTitle: "Back" }} />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          animation: "slide_from_right",
+          gestureEnabled: true,
+          headerShadowVisible: false,
+          headerStyle: { backgroundColor: colors.white },
+          headerTintColor: colors.primary.DEFAULT,
+          headerTitleStyle: { color: colors.text.heading, fontWeight: "600" },
+        }}
+      >
+        <Stack.Screen name="(auth)" options={{ animation: "fade" }} />
+        <Stack.Screen name="(tabs)" options={{ animation: "fade" }} />
+        <Stack.Screen
+          name="project/[id]"
+          options={{
+            headerShown: true,
+            title: "Project",
+            headerBackTitle: "Projects",
+          }}
+        />
+        <Stack.Screen
+          name="survey/[id]"
+          options={{
+            headerShown: true,
+            title: "Survey",
+            headerBackTitle: "Back",
+          }}
+        />
       </Stack>
       {__DEV__ && <DevTool />}
     </View>
