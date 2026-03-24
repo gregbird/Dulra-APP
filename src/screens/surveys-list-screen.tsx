@@ -1,0 +1,152 @@
+import { useEffect, useState, useCallback } from "react";
+import {
+  View,
+  Text,
+  FlatList,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  RefreshControl,
+} from "react-native";
+import { useLocalSearchParams, useRouter, Stack } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { supabase } from "@/lib/supabase";
+import { colors } from "@/constants/colors";
+import type { Survey } from "@/types/survey";
+import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
+
+const statusColors: Record<string, string> = {
+  planned: "#2563EB",
+  in_progress: colors.status.atRisk,
+  completed: colors.status.onTrack,
+  approved: colors.primary.DEFAULT,
+};
+
+export default function SurveysListScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
+  const [surveys, setSurveys] = useState<Survey[]>([]);
+  const [filter, setFilter] = useState<"active" | "completed">("active");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const fetchSurveys = useCallback(async () => {
+    if (!id) return;
+    const { data } = await supabase
+      .from("surveys")
+      .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, created_at, updated_at")
+      .eq("project_id", id)
+      .order("survey_date", { ascending: false });
+    if (data) setSurveys(data);
+  }, [id]);
+
+  useEffect(() => {
+    fetchSurveys().finally(() => setLoading(false));
+  }, [fetchSurveys]);
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchSurveys();
+    setRefreshing(false);
+  };
+
+  const active = surveys.filter((s) => s.status === "planned" || s.status === "in_progress");
+  const completed = surveys.filter((s) => s.status === "completed" || s.status === "approved");
+  const list = filter === "active" ? active : completed;
+
+  const formatDate = (d: string) =>
+    new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+
+  const renderSurvey = ({ item }: { item: Survey }) => {
+    const sc = statusColors[item.status] ?? colors.text.muted;
+    return (
+      <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => router.push(`/survey/${item.id}`)}>
+        <View style={styles.cardRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cardTitle}>{surveyTypeLabels[item.survey_type] ?? item.survey_type}</Text>
+            <Text style={styles.cardSub}>{formatDate(item.survey_date)}</Text>
+            <View style={styles.cardTags}>
+              <View style={[styles.tag, { backgroundColor: sc + "1A" }]}>
+                <Text style={[styles.tagText, { color: sc }]}>{surveyStatusLabels[item.status] ?? item.status}</Text>
+              </View>
+              {item.notes && <Ionicons name="document-text-outline" size={16} color={colors.text.muted} />}
+            </View>
+          </View>
+          <Ionicons name="chevron-forward" size={22} color={colors.text.muted} />
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={colors.primary.DEFAULT} />
+      </View>
+    );
+  }
+
+  return (
+    <>
+      <Stack.Screen options={{ title: "Surveys" }} />
+      <View style={styles.container}>
+        <View style={styles.filterRow}>
+          <TouchableOpacity
+            style={[styles.filterChip, filter === "active" && styles.filterActive]}
+            onPress={() => setFilter("active")}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.filterText, filter === "active" && styles.filterTextActive]}>
+              Active ({active.length})
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.filterChip, filter === "completed" && styles.filterActive]}
+            onPress={() => setFilter("completed")}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.filterText, filter === "completed" && styles.filterTextActive]}>
+              Completed ({completed.length})
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <FlatList
+          data={list}
+          keyExtractor={(item) => item.id}
+          renderItem={renderSurvey}
+          contentContainerStyle={styles.list}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary.DEFAULT} />}
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Ionicons name="clipboard-outline" size={48} color={colors.text.muted} />
+              <Text style={styles.emptyText}>{filter === "active" ? "No active surveys" : "No completed surveys"}</Text>
+            </View>
+          }
+        />
+      </View>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.background.page },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.background.page },
+  filterRow: { flexDirection: "row", paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
+  filterChip: {
+    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20,
+    backgroundColor: colors.background.card, borderWidth: 1, borderColor: "#E5E7EB",
+  },
+  filterActive: { backgroundColor: colors.primary.DEFAULT + "15", borderColor: colors.primary.DEFAULT + "30" },
+  filterText: { fontSize: 14, fontWeight: "600", color: colors.text.muted },
+  filterTextActive: { color: colors.primary.dark },
+  list: { padding: 16, paddingBottom: 32 },
+  card: { backgroundColor: colors.background.card, borderRadius: 14, padding: 18, marginBottom: 10, borderWidth: 1, borderColor: "#E5E7EB" },
+  cardRow: { flexDirection: "row", alignItems: "center" },
+  cardTitle: { fontSize: 17, fontWeight: "600", color: colors.text.heading, marginBottom: 4 },
+  cardSub: { fontSize: 15, color: colors.text.body, marginBottom: 10 },
+  cardTags: { flexDirection: "row", alignItems: "center", gap: 10 },
+  tag: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+  tagText: { fontSize: 13, fontWeight: "600" },
+  empty: { alignItems: "center", paddingTop: 60, gap: 12 },
+  emptyText: { fontSize: 17, color: colors.text.body },
+});

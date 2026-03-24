@@ -65,9 +65,7 @@ export default function RootLayout() {
         <Stack.Screen
           name="project/[id]"
           options={{
-            headerShown: true,
-            title: "Project",
-            headerBackTitle: "Projects",
+            headerShown: false,
           }}
         />
         <Stack.Screen
@@ -75,6 +73,22 @@ export default function RootLayout() {
           options={{
             headerShown: true,
             title: "Survey",
+            headerBackTitle: "Back",
+          }}
+        />
+        <Stack.Screen
+          name="habitat/[habitatId]"
+          options={{
+            headerShown: true,
+            title: "Habitat",
+            headerBackTitle: "Back",
+          }}
+        />
+        <Stack.Screen
+          name="target-note/[noteId]"
+          options={{
+            headerShown: true,
+            title: "Target Note",
             headerBackTitle: "Back",
           }}
         />

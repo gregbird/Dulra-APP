@@ -18,7 +18,7 @@ Tasarım temiz ve sade olmalı.
 
 ## Veri Erişimi ve Giriş
 
-8. ❌ Kullanıcılar mevcut habitat haritalama ve hedef notlar verilerine tam erişime sahip olmalı; bu veriler ister masaüstü uygulamasından ister başka bir yerden girilmiş olsun fark etmemeli
+8. ✅ Kullanıcılar mevcut habitat haritalama ve hedef notlar verilerine tam erişime sahip olmalı; bu veriler ister masaüstü uygulamasından ister başka bir yerden girilmiş olsun fark etmemeli
 
 ## Fotoğraf
 
@@ -139,9 +139,9 @@ Bu adımlar mevcut Next.js projesinde yapılacak. Mobil uygulama web'deki şablo
 
 ### Faz 7 — Veri Erişimi ve Düzenleme
 
-23.) ❌ **Habitat haritalama verilerine erişim** — Supabase'den projenin habitat poligonlarını ve hedef notlarını çek. Harita üzerinde veya liste olarak göster (salt okunur).
+23.) ✅ **Habitat haritalama verilerine erişim** — Supabase'den projenin habitat poligonlarını ve hedef notlarını çek. Harita üzerinde veya liste olarak göster (salt okunur).
 
-24.) ❌ **Anket düzenleme** — Tamamlanmış veya devam eden anketlerin verileri düzenlenebilecek. Değişiklikler SQLite'a yazılır, senkronizasyon ile Supabase'e aktarılır.
+24.) ✅ **Anket düzenleme** — Tamamlanmış veya devam eden anketlerin verileri düzenlenebilecek. Değişiklikler SQLite'a yazılır, senkronizasyon ile Supabase'e aktarılır.
 
 ### Faz 8 — Test ve Yayın
 
