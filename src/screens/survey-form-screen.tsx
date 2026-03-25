@@ -16,6 +16,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import DynamicField from "@/components/dynamic-field";
+import SurveyPhotos from "@/components/survey-photos";
+import type { SurveyPhotosHandle } from "@/components/survey-photos";
+import { uploadPhoto } from "@/lib/photo-service";
 import type { SurveyTemplate, TemplateSection, TemplateField, FormData } from "@/types/survey-template";
 import { surveyTypeLabels } from "@/types/survey";
 
@@ -60,54 +63,86 @@ function SectionFields({
 }
 
 export default function SurveyFormScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{ id: string; projectId?: string; surveyType?: string }>();
   const router = useRouter();
+  const isNew = params.id === "new";
+  const [surveyId, setSurveyId] = useState<string | null>(isNew ? null : params.id);
   const [template, setTemplate] = useState<SurveyTemplate | null>(null);
-  const [surveyType, setSurveyType] = useState<string>("");
+  const [surveyType, setSurveyType] = useState<string>(params.surveyType ?? "");
+  const [projectId, setProjectId] = useState<string>(params.projectId ?? "");
+  const [projectName, setProjectName] = useState<string>("");
   const [formData, setFormData] = useState<FormData>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const photosRef = useRef<SurveyPhotosHandle>(null);
 
-  const fetchSurveyAndTemplate = useCallback(async () => {
-    if (!id) return;
-
-    const { data: survey } = await supabase
-      .from("surveys")
-      .select("survey_type, weather, form_data")
-      .eq("id", id)
-      .single();
-
-    if (!survey) return;
-    setSurveyType(survey.survey_type);
-
+  const loadTemplate = useCallback(async (type: string) => {
     const { data: tmpl } = await supabase
       .from("survey_templates")
       .select("id, name, survey_type, is_active, default_fields")
-      .eq("survey_type", survey.survey_type)
+      .eq("survey_type", type)
       .single();
-
     if (tmpl) {
       setTemplate(tmpl);
       const sections = tmpl.default_fields?.sections ?? [];
       setExpandedSections(new Set(sections.map((s: TemplateSection) => s.id)));
-
-      const existing: FormData = {};
-      if (survey.weather && typeof survey.weather === "object") {
-        const w = survey.weather as Record<string, unknown>;
-        const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
-        existing["weather"] = weatherFields;
-      }
-      if (survey.form_data && typeof survey.form_data === "object") {
-        Object.assign(existing, survey.form_data);
-      }
-      setFormData(existing);
     }
-  }, [id]);
+    return tmpl;
+  }, []);
+
+  const fetchExistingSurvey = useCallback(async () => {
+    if (!surveyId) return;
+    const { data: survey } = await supabase
+      .from("surveys")
+      .select("survey_type, weather, form_data, project_id")
+      .eq("id", surveyId)
+      .single();
+    if (!survey) return;
+    setSurveyType(survey.survey_type);
+    setProjectId(survey.project_id);
+
+    const { data: proj } = await supabase
+      .from("projects")
+      .select("name")
+      .eq("id", survey.project_id)
+      .single();
+    if (proj) setProjectName(proj.name);
+
+    await loadTemplate(survey.survey_type);
+
+    const existing: FormData = {};
+    if (survey.weather && typeof survey.weather === "object") {
+      const w = survey.weather as Record<string, unknown>;
+      const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
+      existing["weather"] = weatherFields;
+    }
+    if (survey.form_data && typeof survey.form_data === "object") {
+      Object.assign(existing, survey.form_data);
+    }
+    setFormData(existing);
+  }, [surveyId, loadTemplate]);
 
   useEffect(() => {
-    fetchSurveyAndTemplate().finally(() => setLoading(false));
-  }, [fetchSurveyAndTemplate]);
+    const init = async () => {
+      if (isNew && surveyType) {
+        await loadTemplate(surveyType);
+        if (params.projectId) {
+          const { data: proj } = await supabase
+            .from("projects")
+            .select("name")
+            .eq("id", params.projectId)
+            .single();
+          if (proj) setProjectName(proj.name);
+        }
+      } else if (surveyId) {
+        await fetchExistingSurvey();
+      }
+      setLoading(false);
+    };
+    init();
+  }, []);
+
 
   const toggleSection = (sectionId: string) => {
     setExpandedSections((prev) => {
@@ -129,7 +164,6 @@ export default function SurveyFormScreen() {
   };
 
   const handleSave = async (markComplete: boolean) => {
-    if (!id) return;
     setSaving(true);
 
     const allFields: Record<string, string | number | null> = {};
@@ -137,22 +171,62 @@ export default function SurveyFormScreen() {
       Object.assign(allFields, sectionValues);
     }
 
-    const { error } = await supabase
-      .from("surveys")
-      .update({
-        weather: { templateFields: allFields },
-        form_data: formData,
-        status: markComplete ? "completed" : "in_progress",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", id);
+    let currentId = surveyId;
+
+    if (!currentId) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || !projectId) { setSaving(false); return; }
+
+      const { data, error: createError } = await supabase
+        .from("surveys")
+        .insert({
+          project_id: projectId,
+          survey_type: surveyType,
+          surveyor_id: user.id,
+          survey_date: new Date().toISOString().split("T")[0],
+          status: markComplete ? "completed" : "in_progress",
+          sync_status: "synced",
+          weather: { templateFields: allFields },
+          form_data: formData,
+        })
+        .select("id")
+        .single();
+
+      if (createError || !data) {
+        setSaving(false);
+        Alert.alert("Error", "Failed to create survey.");
+        return;
+      }
+
+      currentId = data.id;
+      setSurveyId(currentId);
+    } else {
+      const { error } = await supabase
+        .from("surveys")
+        .update({
+          weather: { templateFields: allFields },
+          form_data: formData,
+          status: markComplete ? "completed" : "in_progress",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", currentId);
+
+      if (error) {
+        setSaving(false);
+        Alert.alert("Error", "Failed to save survey data.");
+        return;
+      }
+    }
+
+    const pendingUris = photosRef.current?.getPendingUris() ?? [];
+    await Promise.all(
+      pendingUris.map((uri) =>
+        uploadPhoto({ localUri: uri, projectId, projectName, surveyId: currentId ?? undefined })
+      )
+    );
+    photosRef.current?.clearPending(currentId ?? undefined);
 
     setSaving(false);
-
-    if (error) {
-      Alert.alert("Error", "Failed to save survey data.");
-      return;
-    }
 
     if (markComplete) {
       Alert.alert("Saved", "Survey completed successfully.", [
@@ -213,6 +287,8 @@ export default function SurveyFormScreen() {
               </Text>
             </View>
           )}
+
+          <SurveyPhotos ref={photosRef} surveyId={surveyId} projectId={projectId} projectName={projectName} />
 
           {sections.map((section) => {
             const isExpanded = expandedSections.has(section.id);
@@ -284,48 +360,23 @@ export default function SurveyFormScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background.page },
-  center: {
-    flex: 1, justifyContent: "center", alignItems: "center",
-    backgroundColor: colors.background.page, gap: 12, padding: 32,
-  },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.background.page, gap: 12, padding: 32 },
   emptyTitle: { fontSize: 20, fontWeight: "700", color: colors.text.heading },
   emptyText: { fontSize: 17, color: colors.text.body, textAlign: "center" },
-  backButton: {
-    marginTop: 8, paddingHorizontal: 20, paddingVertical: 10,
-    borderRadius: 10, backgroundColor: colors.primary.DEFAULT + "15",
-  },
+  backButton: { marginTop: 8, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.primary.DEFAULT + "15" },
   backButtonText: { fontSize: 16, fontWeight: "600", color: colors.primary.DEFAULT },
   scroll: { flex: 1 },
   scrollContent: { padding: 16, paddingBottom: 140 },
-  guidanceCard: {
-    flexDirection: "row", gap: 10, backgroundColor: colors.primary.DEFAULT + "0D",
-    borderRadius: 12, padding: 14, marginBottom: 16, alignItems: "flex-start",
-  },
+  guidanceCard: { flexDirection: "row", gap: 10, backgroundColor: colors.primary.DEFAULT + "0D", borderRadius: 12, padding: 14, marginBottom: 16, alignItems: "flex-start" },
   guidanceText: { flex: 1, fontSize: 14, color: colors.text.body, lineHeight: 20 },
-  section: {
-    backgroundColor: colors.background.card, borderRadius: 14,
-    marginBottom: 12, borderWidth: 1, borderColor: "#E5E7EB", overflow: "hidden",
-  },
-  sectionHeader: {
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    padding: 18, minHeight: 60,
-  },
+  section: { backgroundColor: colors.background.card, borderRadius: 14, marginBottom: 12, borderWidth: 1, borderColor: "#E5E7EB", overflow: "hidden" },
+  sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 18, minHeight: 60 },
   sectionTitleRow: { flex: 1, marginRight: 12 },
   sectionTitle: { fontSize: 17, fontWeight: "600", color: colors.text.heading },
   sectionDesc: { fontSize: 14, color: colors.text.muted, marginTop: 2 },
-  footer: {
-    flexDirection: "row", gap: 10, padding: 16,
-    paddingBottom: 32, backgroundColor: colors.background.card,
-    borderTopWidth: 1, borderTopColor: "#E5E7EB",
-  },
-  saveButton: {
-    flex: 1, height: 52, borderRadius: 12, justifyContent: "center",
-    alignItems: "center", borderWidth: 2, borderColor: colors.primary.DEFAULT,
-  },
+  footer: { flexDirection: "row", gap: 10, padding: 16, paddingBottom: 32, backgroundColor: colors.background.card, borderTopWidth: 1, borderTopColor: "#E5E7EB" },
+  saveButton: { flex: 1, height: 52, borderRadius: 12, justifyContent: "center", alignItems: "center", borderWidth: 2, borderColor: colors.primary.DEFAULT },
   saveButtonText: { fontSize: 16, fontWeight: "600", color: colors.primary.DEFAULT },
-  completeButton: {
-    flex: 1, height: 52, borderRadius: 12, justifyContent: "center",
-    alignItems: "center", backgroundColor: colors.primary.DEFAULT,
-  },
+  completeButton: { flex: 1, height: 52, borderRadius: 12, justifyContent: "center", alignItems: "center", backgroundColor: colors.primary.DEFAULT },
   completeButtonText: { fontSize: 16, fontWeight: "600", color: colors.white },
 });

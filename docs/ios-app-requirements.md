@@ -22,8 +22,8 @@ Tasarım temiz ve sade olmalı.
 
 ## Fotoğraf
 
-9. ❌ Uygulama kullanıcıların sahada fotoğraf çekmesine izin vermeli
-10. ❌ Her fotoğraf otomatik olarak filigranlanmalı (watermark) ve coğrafi koordinat etiketlenmeli (geo-coordinate tag)
+9. ✅ Uygulama kullanıcıların sahada fotoğraf çekmesine izin vermeli
+10. ✅ Her fotoğraf otomatik olarak filigranlanmalı (watermark) ve coğrafi koordinat etiketlenmeli (geo-coordinate tag)
 
 ## Veri Senkronizasyonu ve Kalıcılık
 

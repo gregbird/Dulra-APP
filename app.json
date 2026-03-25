@@ -14,7 +14,12 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.dulra.app"
+      "bundleIdentifier": "com.dulra.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Take photos of species, habitats, and survey sites to include in your field records.",
+        "NSLocationWhenInUseUsageDescription": "Your location is recorded with each observation so survey data can be mapped accurately.",
+        "NSPhotoLibraryUsageDescription": "Select photos from your library to attach as evidence to your survey records."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -30,7 +35,19 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Take photos of species, habitats, and survey sites to include in your field records."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Your location is recorded with each observation so survey data can be mapped accurately."
+        }
+      ]
     ]
   }
 }

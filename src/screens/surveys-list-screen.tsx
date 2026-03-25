@@ -12,7 +12,9 @@ import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import SurveyTypePicker from "@/components/survey-type-picker";
 import type { Survey } from "@/types/survey";
+import type { SurveyTemplate } from "@/types/survey-template";
 import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
 
 const statusColors: Record<string, string> = {
@@ -29,6 +31,7 @@ export default function SurveysListScreen() {
   const [filter, setFilter] = useState<"active" | "completed">("active");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [pickerVisible, setPickerVisible] = useState(false);
 
   const fetchSurveys = useCallback(async () => {
     if (!id) return;
@@ -123,6 +126,20 @@ export default function SurveysListScreen() {
             </View>
           }
         />
+
+        <SurveyTypePicker
+          visible={pickerVisible}
+          onClose={() => setPickerVisible(false)}
+          onSelect={(template: SurveyTemplate) => {
+            setPickerVisible(false);
+            router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+          }}
+        />
+
+        <TouchableOpacity style={styles.fab} activeOpacity={0.8} onPress={() => setPickerVisible(true)}>
+          <Ionicons name="add" size={28} color={colors.white} />
+          <Text style={styles.fabText}>Start New Survey</Text>
+        </TouchableOpacity>
       </View>
     </>
   );
@@ -139,7 +156,14 @@ const styles = StyleSheet.create({
   filterActive: { backgroundColor: colors.primary.DEFAULT + "15", borderColor: colors.primary.DEFAULT + "30" },
   filterText: { fontSize: 14, fontWeight: "600", color: colors.text.muted },
   filterTextActive: { color: colors.primary.dark },
-  list: { padding: 16, paddingBottom: 32 },
+  list: { padding: 16, paddingBottom: 100 },
+  fab: {
+    position: "absolute", bottom: 24, left: 20, right: 20, height: 56,
+    backgroundColor: colors.primary.DEFAULT, borderRadius: 14,
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 6,
+  },
+  fabText: { fontSize: 17, fontWeight: "600", color: colors.white },
   card: { backgroundColor: colors.background.card, borderRadius: 14, padding: 18, marginBottom: 10, borderWidth: 1, borderColor: "#E5E7EB" },
   cardRow: { flexDirection: "row", alignItems: "center" },
   cardTitle: { fontSize: 17, fontWeight: "600", color: colors.text.heading, marginBottom: 4 },

@@ -5,6 +5,7 @@ import { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import DevTool from "@/components/dev-tool";
+import WatermarkEngine from "@/components/watermark-engine";
 
 export default function RootLayout() {
   const [session, setSession] = useState<Session | null>(null);
@@ -93,6 +94,7 @@ export default function RootLayout() {
           }}
         />
       </Stack>
+      <WatermarkEngine />
       {__DEV__ && <DevTool />}
     </View>
   );

@@ -77,27 +77,9 @@ export default function ProjectDetailScreen() {
     setRefreshing(false);
   };
 
-  const handleCreateSurvey = async (template: SurveyTemplate) => {
+  const handleCreateSurvey = (template: SurveyTemplate) => {
     setPickerVisible(false);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user || !id) return;
-    const { data, error } = await supabase
-      .from("surveys")
-      .insert({
-        project_id: id,
-        survey_type: template.survey_type,
-        surveyor_id: user.id,
-        survey_date: new Date().toISOString().split("T")[0],
-        status: "in_progress",
-        sync_status: "synced",
-      })
-      .select("id")
-      .single();
-    if (error || !data) {
-      Alert.alert("Error", "Failed to create survey.");
-      return;
-    }
-    router.push(`/survey/${data.id}`);
+    router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
   };
 
   const getCount = (key: string) => {

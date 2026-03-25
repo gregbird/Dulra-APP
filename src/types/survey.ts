@@ -17,12 +17,16 @@ export interface Survey {
 export const surveyTypeLabels: Record<string, string> = {
   releve_survey: "Relevé Survey",
   bat_survey: "Bat Survey",
+  bird_survey: "Bird Survey",
+  botanical_survey: "Botanical Survey",
+  mammal_survey: "Mammal Survey",
+  aquatic_survey: "Aquatic Survey",
+  invertebrate_survey: "Invertebrate Survey",
   habitat: "Habitat Survey",
   habitat_mapping: "Habitat Mapping",
-  bird: "Bird Survey",
-  mammal: "Mammal Survey",
   walkover: "Walkover Survey",
   multi_disciplinary: "Multi-disciplinary",
+  other: "Other",
 };
 
 export const surveyStatusLabels: Record<string, string> = {
