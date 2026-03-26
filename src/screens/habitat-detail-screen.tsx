@@ -11,6 +11,7 @@ import { useLocalSearchParams, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { getCachedHabitat } from "@/lib/database";
 import { conditionColors } from "@/types/habitat";
 import type { HabitatPolygon } from "@/types/habitat";
 import PhotoViewer from "@/components/photo-viewer";
@@ -29,14 +30,23 @@ export default function HabitatDetailScreen() {
     const fetch = async () => {
       if (!habitatId) return;
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from("habitat_polygons")
           .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos")
           .eq("id", habitatId)
           .single();
+        if (error) throw error;
         if (data) setHabitat(data);
       } catch {
-        /* offline */
+        const cached = await getCachedHabitat(habitatId);
+        if (cached) {
+          setHabitat({
+            ...cached,
+            listed_species: cached.listed_species ? JSON.parse(cached.listed_species) : null,
+            threats: cached.threats ? JSON.parse(cached.threats) : null,
+            photos: cached.photos ? JSON.parse(cached.photos) : null,
+          });
+        }
       }
       setLoading(false);
     };

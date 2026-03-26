@@ -14,10 +14,10 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     CREATE TABLE IF NOT EXISTS db_version (version INTEGER);
   `);
   const ver = await database.getFirstAsync<{ version: number }>(`SELECT version FROM db_version LIMIT 1`);
-  if (!ver || ver.version < 2) {
-    await database.execAsync(`DROP TABLE IF EXISTS pending_surveys; DROP TABLE IF EXISTS pending_photos; DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects;`);
+  if (!ver || ver.version < 3) {
+    await database.execAsync(`DROP TABLE IF EXISTS pending_surveys; DROP TABLE IF EXISTS pending_photos; DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (2)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (3)`);
   }
 
   await database.execAsync(`
@@ -74,6 +74,36 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       weather TEXT,
       form_data TEXT,
       notes TEXT,
+      cached_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cached_habitats (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      fossitt_code TEXT,
+      fossitt_name TEXT,
+      area_hectares REAL,
+      condition TEXT,
+      notes TEXT,
+      eu_annex_code TEXT,
+      survey_method TEXT,
+      evaluation TEXT,
+      listed_species TEXT,
+      threats TEXT,
+      photos TEXT,
+      cached_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cached_target_notes (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      category TEXT,
+      title TEXT NOT NULL,
+      description TEXT,
+      priority TEXT,
+      is_verified INTEGER DEFAULT 0,
+      location_text TEXT,
+      photos TEXT,
       cached_at TEXT NOT NULL
     );
   `);
@@ -282,9 +312,70 @@ export async function getCachedProjects(): Promise<Array<{
   return database.getAllAsync(`SELECT * FROM cached_projects ORDER BY updated_at DESC`);
 }
 
+export async function cacheHabitat(params: {
+  id: string; projectId: string; fossittCode: string | null; fossittName: string | null;
+  areaHectares: number | null; condition: string | null; notes: string | null;
+  euAnnexCode: string | null; surveyMethod: string | null; evaluation: string | null;
+  listedSpecies: string[] | null; threats: string[] | null; photos: string[] | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO cached_habitats (id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.projectId, params.fossittCode, params.fossittName, params.areaHectares, params.condition, params.notes, params.euAnnexCode, params.surveyMethod, params.evaluation, JSON.stringify(params.listedSpecies), JSON.stringify(params.threats), JSON.stringify(params.photos), new Date().toISOString()
+  );
+}
+
+export async function getCachedHabitats(projectId: string): Promise<Array<{
+  id: string; project_id: string; fossitt_code: string | null; fossitt_name: string | null;
+  area_hectares: number | null; condition: string | null; notes: string | null;
+  eu_annex_code: string | null; survey_method: string | null; evaluation: string | null;
+}>> {
+  const database = await getDatabase();
+  return database.getAllAsync(`SELECT id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation FROM cached_habitats WHERE project_id = ? ORDER BY fossitt_code`, projectId);
+}
+
+export async function getCachedHabitat(habitatId: string): Promise<{
+  id: string; project_id: string; fossitt_code: string | null; fossitt_name: string | null;
+  area_hectares: number | null; condition: string | null; notes: string | null;
+  eu_annex_code: string | null; survey_method: string | null; evaluation: string | null;
+  listed_species: string | null; threats: string | null; photos: string | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(`SELECT * FROM cached_habitats WHERE id = ?`, habitatId);
+}
+
+export async function cacheTargetNote(params: {
+  id: string; projectId: string; category: string | null; title: string;
+  description: string | null; priority: string | null; isVerified: boolean;
+  locationText: string | null; photos: string[] | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO cached_target_notes (id, project_id, category, title, description, priority, is_verified, location_text, photos, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.projectId, params.category, params.title, params.description, params.priority, params.isVerified ? 1 : 0, params.locationText, JSON.stringify(params.photos), new Date().toISOString()
+  );
+}
+
+export async function getCachedTargetNotes(projectId: string): Promise<Array<{
+  id: string; project_id: string; category: string | null; title: string;
+  description: string | null; priority: string | null; is_verified: boolean;
+}>> {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<{ id: string; project_id: string; category: string | null; title: string; description: string | null; priority: string | null; is_verified: number }>(`SELECT id, project_id, category, title, description, priority, is_verified FROM cached_target_notes WHERE project_id = ? ORDER BY priority`, projectId);
+  return rows.map((r) => ({ ...r, is_verified: r.is_verified === 1 }));
+}
+
+export async function getCachedTargetNote(noteId: string): Promise<{
+  id: string; category: string | null; title: string; description: string | null;
+  priority: string | null; is_verified: number; location_text: string | null; photos: string | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(`SELECT * FROM cached_target_notes WHERE id = ?`, noteId);
+}
+
 export async function clearCachedData(): Promise<void> {
   const database = await getDatabase();
-  await database.execAsync(`DELETE FROM cached_projects; DELETE FROM cached_surveys; DELETE FROM cached_templates;`);
+  await database.execAsync(`DELETE FROM cached_projects; DELETE FROM cached_surveys; DELETE FROM cached_templates; DELETE FROM cached_habitats; DELETE FROM cached_target_notes;`);
 }
 
 export async function getPendingCount(): Promise<number> {

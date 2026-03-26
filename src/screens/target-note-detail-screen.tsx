@@ -11,6 +11,7 @@ import { useLocalSearchParams, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { getCachedTargetNote } from "@/lib/database";
 import { categoryLabels } from "@/types/habitat";
 import PhotoViewer from "@/components/photo-viewer";
 
@@ -39,12 +40,12 @@ export default function TargetNoteDetailScreen() {
     const fetchNote = async () => {
       if (!noteId) return;
       try {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from("target_notes")
           .select("id, category, title, description, priority, is_verified, photos, location")
           .eq("id", noteId)
           .single();
-
+        if (error) throw error;
         if (!data) { setLoading(false); return; }
 
         let locationText: string | null = null;
@@ -55,7 +56,15 @@ export default function TargetNoteDetailScreen() {
 
         setNote({ ...data, location_text: locationText } as NoteDetail);
       } catch {
-        /* offline */
+        const cached = await getCachedTargetNote(noteId);
+        if (cached) {
+          setNote({
+            id: cached.id, category: cached.category, title: cached.title,
+            description: cached.description, priority: cached.priority,
+            is_verified: cached.is_verified === 1, location_text: cached.location_text,
+            photos: cached.photos ? JSON.parse(cached.photos) : null,
+          });
+        }
       }
       setLoading(false);
     };

@@ -44,7 +44,7 @@ export function setupTokenRefresh() {
     if (state === "active") {
       const net = await NetInfo.fetch();
       if (net.isConnected) {
-        supabase.auth.startAutoRefresh();
+        try { supabase.auth.startAutoRefresh(); } catch { /* invalid token */ }
       } else {
         supabase.auth.stopAutoRefresh();
       }

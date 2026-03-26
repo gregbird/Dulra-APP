@@ -79,7 +79,7 @@ export async function saveSurvey(params: SaveParams): Promise<SaveResult> {
       if (error) throw new Error("Failed to update");
     }
 
-    await Promise.all(
+    await Promise.allSettled(
       pendingPhotoUris.map((uri) => uploadPhoto({ localUri: uri, projectId, projectName, surveyId: currentId ?? undefined }))
     );
 

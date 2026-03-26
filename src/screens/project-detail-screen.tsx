@@ -13,7 +13,7 @@ import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
-import { getCachedSurveys, getCachedProjects } from "@/lib/database";
+import { getCachedSurveys, getCachedProjects, getCachedHabitats, getCachedTargetNotes } from "@/lib/database";
 import SurveyTypePicker from "@/components/survey-type-picker";
 import type { Project } from "@/types/project";
 import type { SurveyTemplate } from "@/types/survey-template";
@@ -70,8 +70,10 @@ export default function ProjectDetailScreen() {
       });
     } catch {
       if (!id) return;
-      const cachedSurveys = await getCachedSurveys(id);
-      setCounts({ surveys: cachedSurveys.length, habitats: 0, targetNotes: 0 });
+      const [cachedSurveys, cachedHabitats, cachedNotes] = await Promise.all([
+        getCachedSurveys(id), getCachedHabitats(id), getCachedTargetNotes(id),
+      ]);
+      setCounts({ surveys: cachedSurveys.length, habitats: cachedHabitats.length, targetNotes: cachedNotes.length });
       const allProjects = await getCachedProjects();
       const cached = allProjects.find((p) => p.id === id);
       if (cached) {

@@ -3,6 +3,7 @@ import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { useLocalSearchParams, Stack } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { getCachedTargetNotes } from "@/lib/database";
 import TargetNotesList from "@/components/target-notes-list";
 import type { TargetNote } from "@/types/habitat";
 
@@ -15,14 +16,16 @@ export default function TargetNotesScreen() {
   const fetchNotes = useCallback(async () => {
     if (!id) return;
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("target_notes")
         .select("id, project_id, category, title, description, priority, is_verified")
         .eq("project_id", id)
         .order("priority");
+      if (error) throw error;
       if (data) setNotes(data);
     } catch {
-      /* offline */
+      const cached = await getCachedTargetNotes(id);
+      if (cached.length > 0) setNotes(cached as TargetNote[]);
     }
   }, [id]);
 

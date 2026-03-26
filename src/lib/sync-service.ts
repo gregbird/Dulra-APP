@@ -34,8 +34,10 @@ async function syncSurveys(): Promise<void> {
   const pending = await getPendingSurveys();
 
   for (const survey of pending) {
-    const weather = JSON.parse(survey.weather || "{}");
-    const formData = JSON.parse(survey.form_data || "{}");
+    let weather: Record<string, unknown> = {};
+    let formData: Record<string, unknown> = {};
+    try { weather = JSON.parse(survey.weather || "{}"); } catch { /* corrupted */ }
+    try { formData = JSON.parse(survey.form_data || "{}"); } catch { /* corrupted */ }
 
     const allFields: Record<string, unknown> = {};
     for (const [, sectionValues] of Object.entries(formData)) {

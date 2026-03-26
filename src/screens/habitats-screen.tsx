@@ -3,6 +3,7 @@ import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { useLocalSearchParams, Stack } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { getCachedHabitats } from "@/lib/database";
 import HabitatList from "@/components/habitat-list";
 import type { HabitatPolygon } from "@/types/habitat";
 
@@ -15,14 +16,16 @@ export default function HabitatsScreen() {
   const fetchHabitats = useCallback(async () => {
     if (!id) return;
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("habitat_polygons")
         .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation")
         .eq("project_id", id)
         .order("fossitt_code");
+      if (error) throw error;
       if (data) setHabitats(data);
     } catch {
-      /* offline */
+      const cached = await getCachedHabitats(id);
+      if (cached.length > 0) setHabitats(cached as HabitatPolygon[]);
     }
   }, [id]);
 
