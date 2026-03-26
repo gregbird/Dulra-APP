@@ -123,7 +123,19 @@ export default function ProjectDetailScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ title: project?.name ?? "Project" }} />
+      <Stack.Screen
+        options={{
+          title: project?.name ?? "Project",
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => router.back()}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />
+            </TouchableOpacity>
+          ),
+        }}
+      />
       <ScrollView
         style={styles.container}
         contentContainerStyle={styles.content}
