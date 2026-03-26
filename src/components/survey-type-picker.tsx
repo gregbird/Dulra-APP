@@ -12,6 +12,8 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { cacheTemplate, getCachedTemplates } from "@/lib/database";
+import { useNetworkStore } from "@/lib/network";
 import type { SurveyTemplate } from "@/types/survey-template";
 
 interface SurveyTypePickerProps {
@@ -31,19 +33,42 @@ export default function SurveyTypePicker({
   useEffect(() => {
     if (!visible) return;
 
-    const fetch = async () => {
+    const fetchTemplates = async () => {
       setLoading(true);
-      const { data } = await supabase
-        .from("survey_templates")
-        .select("id, name, survey_type, is_active, default_fields")
-        .eq("is_active", true)
-        .order("name");
+      const isOnline = useNetworkStore.getState().isOnline;
 
-      if (data) setTemplates(data);
+      if (isOnline) {
+        const { data } = await supabase
+          .from("survey_templates")
+          .select("id, name, survey_type, is_active, default_fields")
+          .eq("is_active", true)
+          .order("name");
+
+        if (data) {
+          setTemplates(data);
+          for (const t of data) {
+            await cacheTemplate({
+              surveyType: t.survey_type,
+              name: t.name,
+              defaultFields: t.default_fields ?? {},
+            });
+          }
+        }
+      } else {
+        const cached = await getCachedTemplates();
+        setTemplates(cached.map((c) => ({
+          id: c.survey_type,
+          name: c.name,
+          survey_type: c.survey_type,
+          is_active: true,
+          default_fields: JSON.parse(c.default_fields),
+        })));
+      }
+
       setLoading(false);
     };
 
-    fetch();
+    fetchTemplates();
   }, [visible]);
 
   const hasForm = (t: SurveyTemplate) => {

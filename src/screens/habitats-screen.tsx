@@ -14,12 +14,16 @@ export default function HabitatsScreen() {
 
   const fetchHabitats = useCallback(async () => {
     if (!id) return;
-    const { data } = await supabase
-      .from("habitat_polygons")
-      .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation")
-      .eq("project_id", id)
-      .order("fossitt_code");
-    if (data) setHabitats(data);
+    try {
+      const { data } = await supabase
+        .from("habitat_polygons")
+        .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation")
+        .eq("project_id", id)
+        .order("fossitt_code");
+      if (data) setHabitats(data);
+    } catch {
+      /* offline */
+    }
   }, [id]);
 
   useEffect(() => {

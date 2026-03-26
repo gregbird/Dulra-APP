@@ -15,6 +15,7 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { cacheProject, getCachedProjects } from "@/lib/database";
 import type { Project } from "@/types/project";
 
 const healthLabels: Record<string, { label: string; color: string }> = {
@@ -41,6 +42,7 @@ export default function ProjectsScreen() {
   }, [projects, search]);
 
   const fetchProjects = useCallback(async () => {
+    try {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
@@ -75,9 +77,22 @@ export default function ProjectsScreen() {
     }
 
     const { data, error } = await query;
+    if (error) throw error;
 
-    if (!error && data) {
+    if (data) {
       setProjects(data);
+      for (const p of data) {
+        await cacheProject({ id: p.id, name: p.name, siteCode: p.site_code, status: p.status, healthStatus: p.health_status, county: p.county, updatedAt: p.updated_at });
+      }
+    }
+    } catch {
+      const cached = await getCachedProjects();
+      if (cached.length > 0) {
+        setProjects(cached.map((c) => ({
+          id: c.id, name: c.name, site_code: c.site_code, status: (c.status ?? "active") as "active" | "completed",
+          health_status: c.health_status as "on_track" | "at_risk" | "overdue" | null, county: c.county, updated_at: c.updated_at ?? "",
+        })));
+      }
     }
   }, []);
 
@@ -287,52 +302,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: colors.background.page,
   },
-  searchContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.background.card,
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 4,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    height: 50,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  searchIcon: {
-    marginRight: 10,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 17,
-    color: colors.text.heading,
-  },
-  list: {
-    padding: 16,
-    paddingBottom: 32,
-  },
-  card: {
-    backgroundColor: colors.background.card,
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-  },
-  cardRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  cardContent: {
-    flex: 1,
-  },
-  projectName: {
-    fontSize: 18,
-    fontWeight: "600",
-    color: colors.text.heading,
-    marginBottom: 8,
-    lineHeight: 24,
+  searchContainer: { flexDirection: "row", alignItems: "center", backgroundColor: colors.background.card, marginHorizontal: 16, marginTop: 12, marginBottom: 4, borderRadius: 12, paddingHorizontal: 14, height: 50, borderWidth: 1, borderColor: colors.border },
+  searchIcon: { marginRight: 10 },
+  searchInput: { flex: 1, fontSize: 17, color: colors.text.heading },
+  list: { padding: 16, paddingBottom: 32 },
+  card: { backgroundColor: colors.background.card, borderRadius: 14, padding: 18, marginBottom: 12, borderWidth: 1, borderColor: "#E5E7EB" },
+  cardRow: { flexDirection: "row", alignItems: "center" },
+  cardContent: { flex: 1 },
+  projectName: { fontSize: 18, fontWeight: "600", color: colors.text.heading, marginBottom: 8, lineHeight: 24,
   },
   detailRow: {
     flexDirection: "row",

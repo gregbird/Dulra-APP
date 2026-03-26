@@ -38,21 +38,25 @@ export default function TargetNoteDetailScreen() {
   useEffect(() => {
     const fetchNote = async () => {
       if (!noteId) return;
-      const { data } = await supabase
-        .from("target_notes")
-        .select("id, category, title, description, priority, is_verified, photos, location")
-        .eq("id", noteId)
-        .single();
+      try {
+        const { data } = await supabase
+          .from("target_notes")
+          .select("id, category, title, description, priority, is_verified, photos, location")
+          .eq("id", noteId)
+          .single();
 
-      if (!data) { setLoading(false); return; }
+        if (!data) { setLoading(false); return; }
 
-      let locationText: string | null = null;
-      const loc = data.location as { type?: string; coordinates?: number[] } | null;
-      if (loc?.coordinates) {
-        locationText = `POINT(${loc.coordinates[0]} ${loc.coordinates[1]})`;
+        let locationText: string | null = null;
+        const loc = data.location as { type?: string; coordinates?: number[] } | null;
+        if (loc?.coordinates) {
+          locationText = `POINT(${loc.coordinates[0]} ${loc.coordinates[1]})`;
+        }
+
+        setNote({ ...data, location_text: locationText } as NoteDetail);
+      } catch {
+        /* offline */
       }
-
-      setNote({ ...data, location_text: locationText } as NoteDetail);
       setLoading(false);
     };
     fetchNote();

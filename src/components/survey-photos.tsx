@@ -17,6 +17,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { uploadPhoto } from "@/lib/photo-service";
+import { useNetworkStore } from "@/lib/network";
 import CameraCapture from "@/components/camera-capture";
 
 const thumbSize = (Dimensions.get("window").width - 32 - 24) / 3;
@@ -57,23 +58,29 @@ export default forwardRef<SurveyPhotosHandle, SurveyPhotosProps>(
       clearPending: (newSurveyId?: string) => {
         setPending([]);
         const sid = newSurveyId ?? surveyId;
-        if (sid) refetchSaved(sid);
+        const online = useNetworkStore.getState().isOnline;
+        if (sid && online) refetchSaved(sid);
       },
     }));
 
     const refetchSaved = async (sid: string) => {
-      const { data } = await supabase
-        .from("photos")
-        .select("id, storage_path, watermarked_path")
-        .eq("survey_id", sid)
-        .order("created_at", { ascending: false });
-      if (data) setSaved(data);
+      try {
+        const { data, error } = await supabase
+          .from("photos")
+          .select("id, storage_path, watermarked_path")
+          .eq("survey_id", sid)
+          .order("created_at", { ascending: false });
+        if (error) throw error;
+        if (data) setSaved(data);
+      } catch { /* offline */ }
     };
 
     useEffect(() => {
       if (!surveyId) return;
+      const isOnline = useNetworkStore.getState().isOnline;
+      if (!isOnline) { setLoading(false); return; }
       setLoading(true);
-      refetchSaved(surveyId).then(() => setLoading(false));
+      refetchSaved(surveyId).finally(() => setLoading(false));
     }, [surveyId]);
 
     const uploadImmediately = async (uri: string) => {
@@ -97,7 +104,8 @@ export default forwardRef<SurveyPhotosHandle, SurveyPhotosProps>(
     };
 
     const addPhoto = (uri: string) => {
-      if (surveyId) {
+      const isOnline = useNetworkStore.getState().isOnline;
+      if (surveyId && isOnline) {
         setPending((prev) => [...prev, { uri, uploading: true, failed: false }]);
         uploadImmediately(uri);
       } else {
@@ -144,6 +152,7 @@ export default forwardRef<SurveyPhotosHandle, SurveyPhotosProps>(
       return getPublicUrl(photo.watermarked_path ?? photo.storage_path);
     };
 
+    const isOnline = useNetworkStore((s) => s.isOnline);
     const totalCount = saved.length + pending.length;
 
     return (
@@ -204,7 +213,7 @@ export default forwardRef<SurveyPhotosHandle, SurveyPhotosProps>(
                 )}
               </View>
             ))}
-            {saved.map((photo, i) => (
+            {isOnline && saved.map((photo, i) => (
               <View key={photo.id} style={styles.thumbWrap}>
                 <TouchableOpacity activeOpacity={0.8} onPress={() => setViewerIndex(i)}>
                   <Image
@@ -221,6 +230,9 @@ export default forwardRef<SurveyPhotosHandle, SurveyPhotosProps>(
                 </TouchableOpacity>
               </View>
             ))}
+            {!isOnline && saved.length > 0 && (
+              <Text style={styles.offlineText}>{saved.length} saved photos — visible when online</Text>
+            )}
           </View>
         ) : (
           <Text style={styles.emptyText}>No photos yet</Text>
@@ -318,6 +330,10 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 15, color: colors.text.muted,
     paddingHorizontal: 18, paddingBottom: 18,
+  },
+  offlineText: {
+    fontSize: 14, color: colors.text.muted, fontStyle: "italic",
+    paddingBottom: 4,
   },
   viewer: { flex: 1, backgroundColor: "rgba(0,0,0,0.95)" },
   viewerHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 20, paddingVertical: 12 },

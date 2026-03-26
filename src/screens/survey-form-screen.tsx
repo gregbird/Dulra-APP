@@ -18,7 +18,8 @@ import { colors } from "@/constants/colors";
 import DynamicField from "@/components/dynamic-field";
 import SurveyPhotos from "@/components/survey-photos";
 import type { SurveyPhotosHandle } from "@/components/survey-photos";
-import { uploadPhoto } from "@/lib/photo-service";
+import { getCachedTemplate, cacheTemplate, getCachedSurvey } from "@/lib/database";
+import { saveSurvey } from "@/lib/survey-save";
 import type { SurveyTemplate, TemplateSection, TemplateField, FormData } from "@/types/survey-template";
 import { surveyTypeLabels } from "@/types/survey";
 
@@ -78,72 +79,108 @@ export default function SurveyFormScreen() {
   const photosRef = useRef<SurveyPhotosHandle>(null);
 
   const loadTemplate = useCallback(async (type: string) => {
-    const { data: tmpl } = await supabase
-      .from("survey_templates")
-      .select("id, name, survey_type, is_active, default_fields")
-      .eq("survey_type", type)
-      .single();
-    if (tmpl) {
-      setTemplate(tmpl);
-      const sections = tmpl.default_fields?.sections ?? [];
-      setExpandedSections(new Set(sections.map((s: TemplateSection) => s.id)));
+    try {
+      const { data: tmpl, error: tmplError } = await supabase
+        .from("survey_templates")
+        .select("id, name, survey_type, is_active, default_fields")
+        .eq("survey_type", type)
+        .single();
+      if (tmplError) throw tmplError;
+      if (tmpl) {
+        setTemplate(tmpl);
+        const sections = tmpl.default_fields?.sections ?? [];
+        setExpandedSections(new Set(sections.map((s: TemplateSection) => s.id)));
+        await cacheTemplate({ surveyType: tmpl.survey_type, name: tmpl.name, defaultFields: tmpl.default_fields ?? {} });
+      }
+      return tmpl;
+    } catch {
+      const cached = await getCachedTemplate(type);
+      if (cached) {
+        const parsed = JSON.parse(cached.default_fields);
+        const tmpl = { id: cached.survey_type, name: cached.name, survey_type: cached.survey_type, is_active: true, default_fields: parsed } as SurveyTemplate;
+        setTemplate(tmpl);
+        const sections = parsed?.sections ?? [];
+        setExpandedSections(new Set(sections.map((s: TemplateSection) => s.id)));
+        return tmpl;
+      }
+      return null;
     }
-    return tmpl;
   }, []);
 
   const fetchExistingSurvey = useCallback(async () => {
     if (!surveyId) return;
-    const { data: survey } = await supabase
-      .from("surveys")
-      .select("survey_type, weather, form_data, project_id")
-      .eq("id", surveyId)
-      .single();
-    if (!survey) return;
-    setSurveyType(survey.survey_type);
-    setProjectId(survey.project_id);
+    try {
+      const { data: survey, error: surveyError } = await supabase
+        .from("surveys")
+        .select("survey_type, weather, form_data, project_id")
+        .eq("id", surveyId)
+        .single();
+      if (surveyError) throw surveyError;
+      if (!survey) return;
+      setSurveyType(survey.survey_type);
+      setProjectId(survey.project_id);
 
-    const { data: proj } = await supabase
-      .from("projects")
-      .select("name")
-      .eq("id", survey.project_id)
-      .single();
-    if (proj) setProjectName(proj.name);
+      const { data: proj } = await supabase
+        .from("projects")
+        .select("name")
+        .eq("id", survey.project_id)
+        .single();
+      if (proj) setProjectName(proj.name);
 
-    await loadTemplate(survey.survey_type);
+      await loadTemplate(survey.survey_type);
 
-    const existing: FormData = {};
-    if (survey.weather && typeof survey.weather === "object") {
-      const w = survey.weather as Record<string, unknown>;
-      const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
-      existing["weather"] = weatherFields;
+      const existing: FormData = {};
+      if (survey.weather && typeof survey.weather === "object") {
+        const w = survey.weather as Record<string, unknown>;
+        const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
+        existing["weather"] = weatherFields;
+      }
+      if (survey.form_data && typeof survey.form_data === "object") {
+        Object.assign(existing, survey.form_data);
+      }
+      setFormData(existing);
+    } catch {
+      if (!surveyId) return;
+      const cached = await getCachedSurvey(surveyId);
+      if (cached) {
+        setSurveyType(cached.survey_type);
+        setProjectId(cached.project_id);
+        await loadTemplate(cached.survey_type);
+        const existing: FormData = {};
+        if (cached.weather) {
+          const w = JSON.parse(cached.weather);
+          const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
+          existing["weather"] = weatherFields;
+        }
+        if (cached.form_data) {
+          Object.assign(existing, JSON.parse(cached.form_data));
+        }
+        setFormData(existing);
+      }
     }
-    if (survey.form_data && typeof survey.form_data === "object") {
-      Object.assign(existing, survey.form_data);
-    }
-    setFormData(existing);
   }, [surveyId, loadTemplate]);
 
   useEffect(() => {
     const init = async () => {
-      if (isNew && surveyType) {
-        await loadTemplate(surveyType);
-        if (params.projectId) {
-          const { data: proj } = await supabase
-            .from("projects")
-            .select("name")
-            .eq("id", params.projectId)
-            .single();
-          if (proj) setProjectName(proj.name);
+      try {
+        if (isNew && surveyType) {
+          await loadTemplate(surveyType);
+          if (params.projectId) {
+            const { data: proj } = await supabase
+              .from("projects")
+              .select("name")
+              .eq("id", params.projectId)
+              .single();
+            if (proj) setProjectName(proj.name);
+          }
+        } else if (surveyId) {
+          await fetchExistingSurvey();
         }
-      } else if (surveyId) {
-        await fetchExistingSurvey();
-      }
+      } catch { /* offline */ }
       setLoading(false);
     };
     init();
   }, []);
-
-
   const toggleSection = (sectionId: string) => {
     setExpandedSections((prev) => {
       const next = new Set(prev);
@@ -152,80 +189,36 @@ export default function SurveyFormScreen() {
       return next;
     });
   };
-
   const updateField = (sectionId: string, fieldKey: string, value: string | number | null) => {
-    setFormData((prev) => ({
-      ...prev,
-      [sectionId]: {
-        ...(prev[sectionId] ?? {}),
-        [fieldKey]: value,
-      },
-    }));
+    setFormData((prev) => ({ ...prev, [sectionId]: { ...(prev[sectionId] ?? {}), [fieldKey]: value } }));
   };
 
   const handleSave = async (markComplete: boolean) => {
     setSaving(true);
-
-    const allFields: Record<string, string | number | null> = {};
-    for (const [, sectionValues] of Object.entries(formData)) {
-      Object.assign(allFields, sectionValues);
-    }
-
-    let currentId = surveyId;
-
-    if (!currentId) {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user || !projectId) { setSaving(false); return; }
-
-      const { data, error: createError } = await supabase
-        .from("surveys")
-        .insert({
-          project_id: projectId,
-          survey_type: surveyType,
-          surveyor_id: user.id,
-          survey_date: new Date().toISOString().split("T")[0],
-          status: markComplete ? "completed" : "in_progress",
-          sync_status: "synced",
-          weather: { templateFields: allFields },
-          form_data: formData,
-        })
-        .select("id")
-        .single();
-
-      if (createError || !data) {
-        setSaving(false);
-        Alert.alert("Error", "Failed to create survey.");
-        return;
-      }
-
-      currentId = data.id;
-      setSurveyId(currentId);
-    } else {
-      const { error } = await supabase
-        .from("surveys")
-        .update({
-          weather: { templateFields: allFields },
-          form_data: formData,
-          status: markComplete ? "completed" : "in_progress",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", currentId);
-
-      if (error) {
-        setSaving(false);
-        Alert.alert("Error", "Failed to save survey data.");
-        return;
-      }
-    }
-
     const pendingUris = photosRef.current?.getPendingUris() ?? [];
-    await Promise.all(
-      pendingUris.map((uri) =>
-        uploadPhoto({ localUri: uri, projectId, projectName, surveyId: currentId ?? undefined })
-      )
-    );
-    photosRef.current?.clearPending(currentId ?? undefined);
 
+    const result = await saveSurvey({
+      surveyId, projectId, projectName, surveyType,
+      formData, markComplete, pendingPhotoUris: pendingUris,
+    });
+
+    if (result.offline) {
+      photosRef.current?.clearPending();
+      setSaving(false);
+      Alert.alert("Saved Offline", "Data saved locally. It will sync when you're back online.", [
+        { text: "OK", onPress: () => router.back() },
+      ]);
+      return;
+    }
+
+    if (!result.success) {
+      setSaving(false);
+      Alert.alert("Error", result.error ?? "Failed to save survey.");
+      return;
+    }
+
+    if (result.surveyId) setSurveyId(result.surveyId);
+    photosRef.current?.clearPending(result.surveyId ?? undefined);
     setSaving(false);
 
     if (markComplete) {
@@ -255,12 +248,9 @@ export default function SurveyFormScreen() {
         <View style={styles.center}>
           <Ionicons name="construct-outline" size={48} color={colors.text.muted} />
           <Text style={styles.emptyTitle}>Coming Soon</Text>
-          <Text style={styles.emptyText}>
-            This survey type is not yet available on mobile.
-          </Text>
+          <Text style={styles.emptyText}>This survey type is not yet available on mobile.</Text>
           <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-            <Text style={styles.backButtonText}>Go Back</Text>
-          </TouchableOpacity>
+            <Text style={styles.backButtonText}>Go Back</Text></TouchableOpacity>
         </View>
       </>
     );

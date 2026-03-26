@@ -28,12 +28,16 @@ export default function HabitatDetailScreen() {
   useEffect(() => {
     const fetch = async () => {
       if (!habitatId) return;
-      const { data } = await supabase
-        .from("habitat_polygons")
-        .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos")
-        .eq("id", habitatId)
-        .single();
-      if (data) setHabitat(data);
+      try {
+        const { data } = await supabase
+          .from("habitat_polygons")
+          .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos")
+          .eq("id", habitatId)
+          .single();
+        if (data) setHabitat(data);
+      } catch {
+        /* offline */
+      }
       setLoading(false);
     };
     fetch();

@@ -14,12 +14,16 @@ export default function TargetNotesScreen() {
 
   const fetchNotes = useCallback(async () => {
     if (!id) return;
-    const { data } = await supabase
-      .from("target_notes")
-      .select("id, project_id, category, title, description, priority, is_verified")
-      .eq("project_id", id)
-      .order("priority");
-    if (data) setNotes(data);
+    try {
+      const { data } = await supabase
+        .from("target_notes")
+        .select("id, project_id, category, title, description, priority, is_verified")
+        .eq("project_id", id)
+        .order("priority");
+      if (data) setNotes(data);
+    } catch {
+      /* offline */
+    }
   }, [id]);
 
   useEffect(() => {

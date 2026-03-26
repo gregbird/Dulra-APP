@@ -13,6 +13,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import SurveyTypePicker from "@/components/survey-type-picker";
+import { cacheSurvey, getCachedSurveys } from "@/lib/database";
 import type { Survey } from "@/types/survey";
 import type { SurveyTemplate } from "@/types/survey-template";
 import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
@@ -35,12 +36,35 @@ export default function SurveysListScreen() {
 
   const fetchSurveys = useCallback(async () => {
     if (!id) return;
-    const { data } = await supabase
-      .from("surveys")
-      .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, created_at, updated_at")
-      .eq("project_id", id)
-      .order("survey_date", { ascending: false });
-    if (data) setSurveys(data);
+    try {
+      const { data, error } = await supabase
+        .from("surveys")
+        .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, weather, form_data, created_at, updated_at")
+        .eq("project_id", id)
+        .order("survey_date", { ascending: false });
+      if (error) throw error;
+      if (data) {
+        setSurveys(data);
+        for (const s of data) {
+          await cacheSurvey({
+            id: s.id, projectId: s.project_id, surveyType: s.survey_type,
+            surveyDate: s.survey_date, status: s.status,
+            weather: s.weather as Record<string, unknown> | null,
+            formData: s.form_data as Record<string, unknown> | null,
+            notes: s.notes,
+          });
+        }
+      }
+    } catch {
+      const cached = await getCachedSurveys(id);
+      if (cached.length > 0) {
+        setSurveys(cached.map((c) => ({
+          ...c, surveyor_id: null, start_time: null, end_time: null,
+          sync_status: "synced" as const, created_at: "", updated_at: "",
+          status: c.status as Survey["status"],
+        })));
+      }
+    }
   }, [id]);
 
   useEffect(() => {

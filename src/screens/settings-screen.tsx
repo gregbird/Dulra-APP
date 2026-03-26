@@ -27,16 +27,20 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     const fetchProfile = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
 
-      const { data } = await supabase
-        .from("profiles")
-        .select("id, email, full_name, role, organization_id")
-        .eq("id", user.id)
-        .single();
+        const { data } = await supabase
+          .from("profiles")
+          .select("id, email, full_name, role, organization_id")
+          .eq("id", user.id)
+          .single();
 
-      if (data) setProfile(data as Profile);
+        if (data) setProfile(data as Profile);
+      } catch {
+        /* offline */
+      }
       setLoading(false);
     };
 

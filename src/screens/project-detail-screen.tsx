@@ -13,6 +13,7 @@ import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { getCachedSurveys, getCachedProjects } from "@/lib/database";
 import SurveyTypePicker from "@/components/survey-type-picker";
 import type { Project } from "@/types/project";
 import type { SurveyTemplate } from "@/types/survey-template";
@@ -40,31 +41,48 @@ export default function ProjectDetailScreen() {
 
   const fetchData = useCallback(async () => {
     if (!id) return;
-    const [projectRes, surveysRes, habitatsRes, notesRes] = await Promise.all([
-      supabase
-        .from("projects")
-        .select("id, name, site_code, status, health_status, county, updated_at")
-        .eq("id", id)
-        .single(),
-      supabase
-        .from("surveys")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", id),
-      supabase
-        .from("habitat_polygons")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", id),
-      supabase
-        .from("target_notes")
-        .select("id", { count: "exact", head: true })
-        .eq("project_id", id),
-    ]);
-    if (projectRes.data) setProject(projectRes.data);
-    setCounts({
-      surveys: surveysRes.count ?? 0,
-      habitats: habitatsRes.count ?? 0,
-      targetNotes: notesRes.count ?? 0,
-    });
+    try {
+      const [projectRes, surveysRes, habitatsRes, notesRes] = await Promise.all([
+        supabase
+          .from("projects")
+          .select("id, name, site_code, status, health_status, county, updated_at")
+          .eq("id", id)
+          .single(),
+        supabase
+          .from("surveys")
+          .select("id", { count: "exact", head: true })
+          .eq("project_id", id),
+        supabase
+          .from("habitat_polygons")
+          .select("id", { count: "exact", head: true })
+          .eq("project_id", id),
+        supabase
+          .from("target_notes")
+          .select("id", { count: "exact", head: true })
+          .eq("project_id", id),
+      ]);
+      if (projectRes.error) throw projectRes.error;
+      if (projectRes.data) setProject(projectRes.data);
+      setCounts({
+        surveys: surveysRes.count ?? 0,
+        habitats: habitatsRes.count ?? 0,
+        targetNotes: notesRes.count ?? 0,
+      });
+    } catch {
+      if (!id) return;
+      const cachedSurveys = await getCachedSurveys(id);
+      setCounts({ surveys: cachedSurveys.length, habitats: 0, targetNotes: 0 });
+      const allProjects = await getCachedProjects();
+      const cached = allProjects.find((p) => p.id === id);
+      if (cached) {
+        setProject({
+          id: cached.id, name: cached.name, site_code: cached.site_code,
+          status: (cached.status ?? "active") as "active" | "completed",
+          health_status: cached.health_status as "on_track" | "at_risk" | "overdue" | null,
+          county: cached.county, updated_at: cached.updated_at ?? "",
+        });
+      }
+    }
   }, [id]);
 
   useEffect(() => {
