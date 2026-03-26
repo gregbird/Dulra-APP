@@ -27,8 +27,8 @@ Tasarım temiz ve sade olmalı.
 
 ## Veri Senkronizasyonu ve Kalıcılık
 
-11. ❌ Tüm anket verileri ve fotoğraflar hücresel ağ veya Wi-Fi bağlantısı olmasa bile uygulama içerisinde otomatik olarak yerel kayıt edilmeli ve veri kalıcılığı sağlanmalı
-12. ❌ Hücresel ağ ve/veya Wi-Fi erişimi yeniden sağlandığında yerel olarak kaydedilmiş tüm veriler otomatik olarak senkronize edilmeli; hem mobil uygulamadaki ilgili projeye hem de masaüstü uygulamasındaki ilgili projeye kaydedilmeli
+11. ✅ Tüm anket verileri ve fotoğraflar hücresel ağ veya Wi-Fi bağlantısı olmasa bile uygulama içerisinde otomatik olarak yerel kayıt edilmeli ve veri kalıcılığı sağlanmalı
+12. ✅ Hücresel ağ ve/veya Wi-Fi erişimi yeniden sağlandığında yerel olarak kaydedilmiş tüm veriler otomatik olarak senkronize edilmeli; hem mobil uygulamadaki ilgili projeye hem de masaüstü uygulamasındaki ilgili projeye kaydedilmeli
 
 ---
 
