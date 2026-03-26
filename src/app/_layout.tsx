@@ -72,12 +72,20 @@ export default function RootLayout() {
       let projectIds: string[] | null = null;
 
       if (!isAdminOrPM) {
-        const { data: memberships } = await supabase
-          .from("project_members")
-          .select("project_id")
-          .eq("user_id", user.id);
+        const [{ data: memberships }, { data: createdProjects }] = await Promise.all([
+          supabase
+            .from("project_members")
+            .select("project_id")
+            .eq("user_id", user.id),
+          supabase
+            .from("projects")
+            .select("id")
+            .eq("created_by", user.id),
+        ]);
 
-        projectIds = memberships?.map((m) => m.project_id) ?? [];
+        const memberIds = memberships?.map((m) => m.project_id) ?? [];
+        const createdIds = createdProjects?.map((p) => p.id) ?? [];
+        projectIds = [...new Set([...memberIds, ...createdIds])];
 
         if (projectIds.length === 0) {
           await clearCachedData();

@@ -19,6 +19,7 @@ const roleLabels: Record<string, { label: string; color: string }> = {
   ecologist: { label: "Ecologist", color: colors.role.ecologist },
   junior: { label: "Junior Ecologist", color: colors.role.junior },
   third_party: { label: "3rd Party", color: colors.role.thirdParty },
+  client: { label: "Client", color: colors.role.client },
 };
 
 export default function SettingsScreen() {

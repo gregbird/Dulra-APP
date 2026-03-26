@@ -12,7 +12,7 @@ export interface ProjectMember {
   id: string;
   project_id: string;
   user_id: string;
-  role: "admin" | "project_manager" | "ecologist" | "junior" | "third_party";
+  role: "admin" | "project_manager" | "ecologist" | "junior" | "third_party" | "client";
   assigned_at: string;
 }
 
@@ -20,6 +20,6 @@ export interface Profile {
   id: string;
   email: string;
   full_name: string;
-  role: "admin" | "project_manager" | "ecologist" | "junior" | "third_party";
+  role: "admin" | "project_manager" | "ecologist" | "junior" | "third_party" | "client";
   organization_id: string;
 }
