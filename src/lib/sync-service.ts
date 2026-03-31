@@ -8,6 +8,7 @@ import {
   getPendingCount,
 } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
+import { insertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
 
 let syncing = false;
 
@@ -85,6 +86,21 @@ async function syncSurveys(): Promise<void> {
         .single();
 
       if (!error && data) {
+        if (survey.survey_type === "releve_survey") {
+          const releveFields = extractReleveFromFormData(formData as Record<string, unknown>);
+          const releveId = await insertReleveSurvey({
+            projectId: survey.project_id,
+            surveyId: data.id,
+            surveyDate: survey.survey_date,
+            releveFields,
+            userId: surveyorId || null,
+          });
+          if (releveId) {
+            const species = extractSpeciesFromFormData(formData as Record<string, unknown>);
+            await insertReleveSpecies(releveId, species);
+          }
+        }
+
         await markSurveySynced(survey.id);
         await updatePhotoSurveyIds(survey.id, data.id);
       }

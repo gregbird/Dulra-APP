@@ -14,6 +14,7 @@ import { cacheTemplate, cacheProject, cacheSurvey, cacheHabitat, cacheTargetNote
 export default function RootLayout() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dataCached, setDataCached] = useState(false);
   const router = useRouter();
   const segments = useSegments();
 
@@ -176,8 +177,8 @@ export default function RootLayout() {
       router.replace("/(tabs)");
     }
 
-    if (session) {
-      cacheAllData();
+    if (session && !dataCached) {
+      cacheAllData().then(() => setDataCached(true));
     }
   }, [session, loading, segments]);
 
@@ -232,6 +233,14 @@ export default function RootLayout() {
           options={{
             headerShown: true,
             title: "Target Note",
+            headerBackTitle: "Back",
+          }}
+        />
+        <Stack.Screen
+          name="releve-survey/[id]"
+          options={{
+            headerShown: true,
+            title: "Relevé Survey",
             headerBackTitle: "Back",
           }}
         />

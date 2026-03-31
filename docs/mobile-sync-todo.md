@@ -93,23 +93,34 @@
 
 ## FAZ 4 — Releve survey veri butunlugu
 
-### 4.1 Releve survey kaydi
-- [ ] `src/lib/survey-save.ts` — `survey_type === "releve_survey"` ise `releve_surveys` tablosuna da INSERT yap (survey_id ile baglantili)
-- [ ] Form data'dan releve alanlarini cikart: releve_code, recorder, habitat_type, soil_type, cover yuzdeleri vb.
-- [ ] Mevcut `surveys.form_data` yapisini da koru (geriye uyumluluk)
+### 4.1 Releve survey kaydi ✓
+> Yeni dosyalar: `src/types/releve.ts` (tip tanimlari + extractReleveFields), `src/lib/releve-save.ts` (insert/upsert/species fonksiyonlari). Online ve offline akislarin ikisinde de releve_surveys INSERT eklendi.
 
-### 4.2 Releve species kaydi
-- [ ] Tur verisi varsa `releve_species` tablosuna INSERT (releve_id ile baglantili)
-- [ ] species_name_latin, species_cover_domin, species_cover_pct alanlari
+- [x] `src/types/releve.ts` — `ReleveData` interface (30+ kolon), `ReleveSpeciesEntry` interface, `extractReleveFields()` helper (numeric/string ayirimi ile form → DB kolon eslestirmesi)
+- [x] `src/lib/releve-save.ts` — `insertReleveSurvey()` (surveys INSERT sonrasi cagirilir), `upsertReleveSurvey()` (delete+insert, guncelleme icin), `extractReleveFromFormData()` (section bazli formData'yi duzlestirir)
+- [x] `src/lib/survey-save.ts` — Online yeni kayit: `surveyType === "releve_survey"` kontrolu ile surveys INSERT → releve_surveys INSERT. Online guncelleme: surveys UPDATE → releve_surveys upsert (delete+insert)
+- [x] Mevcut `surveys.form_data` yapisi korunuyor (geriye uyumluluk) — releve alanlari form_data'dan extract edilip ayrica releve_surveys'e yaziliyor
 
-### 4.3 Releve otomatik doldurma
-- [ ] Survey olusturulurken otomatik doldur: survey_date, surveyor_id, site_id
-- [ ] Releve icin ek: site_name (proje adi), releve_code (`REL ${101 + count}`), recorder (kullanicinin full_name'i)
-- [ ] releve_code hesaplamak icin: `SELECT COUNT(*) FROM releve_surveys WHERE project_id = :projectId`
+### 4.2 Releve species kaydi ✓
+> Species INSERT fonksiyonu `releve-save.ts`'e eklendi. formData.species dizisinden parse edilip releve_species tablosuna yaziliyor. Upsert durumunda cascade delete ile eski species silinip yeniden ekleniyor.
 
-### 4.4 Offline sync
-- [ ] `src/lib/sync-service.ts` — sync akisina releve_surveys + releve_species INSERT ekle
-- [ ] `src/lib/database.ts` — pending_surveys tablosuna releve-specific alanlari ekle (veya form_data'dan parse et)
+- [x] `src/lib/releve-save.ts` — `insertReleveSpecies(releveId, species[])` fonksiyonu eklendi, species_name_latin bos olanlari filtreler
+- [x] `src/lib/releve-save.ts` — `extractSpeciesFromFormData()` fonksiyonu eklendi, formData.species dizisini validate eder
+- [x] `src/lib/survey-save.ts` — Online yeni kayit ve guncelleme: releve INSERT/upsert sonrasi releveId ile species INSERT
+- [x] `src/lib/sync-service.ts` — Offline sync: releve INSERT sonrasi species INSERT
+
+### 4.3 Releve otomatik doldurma ✓
+> `getReleveDefaults()` fonksiyonu `releve-save.ts`'e eklendi. Releve form acildiginda cagrilacak. Online: Supabase'den count + profil cekilir. Offline: count 101'den baslar, recorder bos kalir (kullanici doldurur). Pending survey'ler de count'a dahil edilir (duplike releve_code onlenir).
+
+- [x] `src/lib/releve-save.ts` — `getReleveDefaults({ projectId, projectName })` fonksiyonu: survey_date (bugun), recorder (profiles.full_name), releve_code (`REL ${101 + count}`), site_name (proje adi)
+- [x] releve_code hesabi: Supabase'den `SELECT COUNT(*) FROM releve_surveys WHERE project_id` + SQLite'dan pending releve survey sayisi
+- [x] site_id henuz yok (Faz 3 bekliyor), site_name olarak proje adi kullaniliyor
+
+### 4.4 Offline sync ✓
+> 4.1 ve 4.2 ile birlikte yapildi. Sync akisinda `survey_type === "releve_survey"` kontrolu ile chain INSERT eklendi. Ayri migration gerekmedi — releve verileri mevcut pending_surveys.form_data JSON'unda saklanip sync sirasinda parse ediliyor.
+
+- [x] `src/lib/sync-service.ts` — sync akisina releve_surveys + releve_species INSERT eklendi (surveys INSERT → releve INSERT → species INSERT chain)
+- [x] `src/lib/database.ts` — pending_surveys tablosuna ek kolon gerekmedi, form_data JSON'undan parse ediliyor (`extractReleveFromFormData` + `extractSpeciesFromFormData`)
 
 ---
 

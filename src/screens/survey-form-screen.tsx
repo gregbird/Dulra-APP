@@ -117,6 +117,12 @@ export default function SurveyFormScreen() {
         .single();
       if (surveyError) throw surveyError;
       if (!survey) return;
+
+      if (survey.survey_type === "releve_survey") {
+        router.replace(`/releve-survey/${surveyId}?projectId=${survey.project_id}`);
+        return;
+      }
+
       setSurveyType(survey.survey_type);
       setProjectId(survey.project_id);
 
@@ -143,6 +149,10 @@ export default function SurveyFormScreen() {
       if (!surveyId) return;
       const cached = await getCachedSurvey(surveyId);
       if (cached) {
+        if (cached.survey_type === "releve_survey") {
+          router.replace(`/releve-survey/${surveyId}?projectId=${cached.project_id}`);
+          return;
+        }
         setSurveyType(cached.survey_type);
         setProjectId(cached.project_id);
         await loadTemplate(cached.survey_type);

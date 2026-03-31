@@ -1,7 +1,8 @@
 import { supabase } from "@/lib/supabase";
 import { uploadPhoto } from "@/lib/photo-service";
-import { saveSurveyLocally, savePhotoLocally } from "@/lib/database";
+import { saveSurveyLocally, savePhotoLocally, cacheSurvey } from "@/lib/database";
 import { refreshPendingCount } from "@/lib/sync-service";
+import { insertReleveSurvey, upsertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
 import type { FormData } from "@/types/survey-template";
 
 interface SaveParams {
@@ -35,12 +36,21 @@ async function saveOffline(params: SaveParams, status: string, allFields: Record
     status, weather: { templateFields: allFields }, formData: params.formData,
   });
 
+  // Mevcut survey düzenleniyorsa cache'i de güncelle
+  if (params.surveyId) {
+    await cacheSurvey({
+      id: params.surveyId, projectId: params.projectId, surveyType: params.surveyType,
+      surveyDate: new Date().toISOString().split("T")[0],
+      status, weather: { templateFields: allFields }, formData: params.formData, notes: null,
+    });
+  }
+
   for (const uri of params.pendingPhotoUris) {
     await savePhotoLocally({ localUri: uri, projectId: params.projectId, projectName: params.projectName, surveyLocalId: localId });
   }
 
   await refreshPendingCount();
-  return { success: true, surveyId: null, offline: true };
+  return { success: true, surveyId: params.surveyId ?? null, offline: true };
 }
 
 export async function saveSurvey(params: SaveParams): Promise<SaveResult> {
@@ -71,17 +81,56 @@ export async function saveSurvey(params: SaveParams): Promise<SaveResult> {
 
       if (error || !data) throw new Error("Failed to create");
       currentId = data.id;
+
+      if (surveyType === "releve_survey") {
+        const releveFields = extractReleveFromFormData(formData);
+        const releveId = await insertReleveSurvey({
+          projectId,
+          surveyId: currentId,
+          surveyDate: new Date().toISOString().split("T")[0],
+          releveFields,
+          userId: user.id,
+        });
+        if (releveId) {
+          const species = extractSpeciesFromFormData(formData);
+          await insertReleveSpecies(releveId, species);
+        }
+      }
     } else {
+      const { data: { user } } = await supabase.auth.getUser();
+
       const { error } = await supabase
         .from("surveys")
         .update({ weather: { templateFields: allFields }, form_data: formData, status, updated_at: new Date().toISOString() })
         .eq("id", currentId);
       if (error) throw new Error("Failed to update");
+
+      if (surveyType === "releve_survey" && currentId) {
+        const releveFields = extractReleveFromFormData(formData);
+        const releveId = await upsertReleveSurvey({
+          projectId,
+          surveyId: currentId,
+          surveyDate: new Date().toISOString().split("T")[0],
+          releveFields,
+          userId: user?.id,
+        });
+        if (releveId) {
+          const species = extractSpeciesFromFormData(formData);
+          await insertReleveSpecies(releveId, species);
+        }
+      }
     }
 
     await Promise.allSettled(
       pendingPhotoUris.map((uri) => uploadPhoto({ localUri: uri, projectId, projectName, surveyId: currentId ?? undefined }))
     );
+
+    if (currentId) {
+      await cacheSurvey({
+        id: currentId, projectId, surveyType, surveyDate: new Date().toISOString().split("T")[0],
+        status, weather: { templateFields: allFields }, formData, notes: null,
+      });
+    }
 
     return { success: true, surveyId: currentId, offline: false };
   } catch {

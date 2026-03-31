@@ -154,7 +154,11 @@ export default function SurveysListScreen() {
           onClose={() => setPickerVisible(false)}
           onSelect={(template: SurveyTemplate) => {
             setPickerVisible(false);
-            router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+            if (template.survey_type === "releve_survey") {
+              router.push(`/releve-survey/new?projectId=${id}`);
+            } else {
+              router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+            }
           }}
         />
 

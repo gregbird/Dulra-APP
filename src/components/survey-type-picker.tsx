@@ -16,6 +16,14 @@ import { cacheTemplate, getCachedTemplates } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
 import type { SurveyTemplate } from "@/types/survey-template";
 
+const RELEVE_ENTRY: SurveyTemplate = {
+  id: "releve_survey",
+  name: "Relevé Survey",
+  survey_type: "releve_survey",
+  is_active: true,
+  default_fields: { sections: [] },
+};
+
 interface SurveyTypePickerProps {
   visible: boolean;
   onClose: () => void;
@@ -45,7 +53,8 @@ export default function SurveyTypePicker({
           .order("name");
 
         if (data) {
-          setTemplates(data);
+          const hasReleve = data.some((t) => t.survey_type === "releve_survey");
+          setTemplates(hasReleve ? data : [...data, RELEVE_ENTRY]);
           for (const t of data) {
             await cacheTemplate({
               surveyType: t.survey_type,
@@ -56,13 +65,15 @@ export default function SurveyTypePicker({
         }
       } else {
         const cached = await getCachedTemplates();
-        setTemplates(cached.map((c) => ({
+        const list = cached.map((c) => ({
           id: c.survey_type,
           name: c.name,
           survey_type: c.survey_type,
           is_active: true,
           default_fields: JSON.parse(c.default_fields),
-        })));
+        }));
+        const hasReleve = list.some((t) => t.survey_type === "releve_survey");
+        setTemplates(hasReleve ? list : [...list, RELEVE_ENTRY]);
       }
 
       setLoading(false);
@@ -72,6 +83,7 @@ export default function SurveyTypePicker({
   }, [visible]);
 
   const hasForm = (t: SurveyTemplate) => {
+    if (t.survey_type === "releve_survey") return true;
     const sections = t.default_fields?.sections;
     return Array.isArray(sections) && sections.length > 0;
   };
