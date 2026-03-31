@@ -18,6 +18,13 @@ import { colors } from "@/constants/colors";
 import { cacheProject, getCachedProjects } from "@/lib/database";
 import type { Project } from "@/types/project";
 
+const statusLabels: Record<string, string> = {
+  draft: "Draft",
+  active: "Active",
+  completed: "Completed",
+  archived: "Archived",
+};
+
 const healthLabels: Record<string, { label: string; color: string }> = {
   on_track: { label: "On Track", color: colors.status.onTrack },
   at_risk: { label: "At Risk", color: colors.status.atRisk },
@@ -97,8 +104,8 @@ export default function ProjectsScreen() {
       const cached = await getCachedProjects();
       if (cached.length > 0) {
         setProjects(cached.map((c) => ({
-          id: c.id, name: c.name, site_code: c.site_code, status: (c.status ?? "active") as "active" | "completed",
-          health_status: c.health_status as "on_track" | "at_risk" | "overdue" | null, county: c.county, updated_at: c.updated_at ?? "",
+          id: c.id, name: c.name, site_code: c.site_code, status: (c.status ?? "active") as Project["status"],
+          health_status: (c.health_status ?? "on_track") as Project["health_status"], county: c.county, updated_at: c.updated_at ?? "",
         })));
       }
     }
@@ -167,6 +174,8 @@ export default function ProjectsScreen() {
                   styles.tag,
                   item.status === "active"
                     ? styles.tagActive
+                    : item.status === "draft"
+                    ? styles.tagDraft
                     : styles.tagCompleted,
                 ]}
               >
@@ -175,10 +184,12 @@ export default function ProjectsScreen() {
                     styles.tagText,
                     item.status === "active"
                       ? styles.tagActiveText
+                      : item.status === "draft"
+                      ? styles.tagDraftText
                       : styles.tagCompletedText,
                   ]}
                 >
-                  {item.status === "active" ? "Active" : "Completed"}
+                  {statusLabels[item.status] ?? item.status}
                 </Text>
               </View>
 
@@ -348,6 +359,9 @@ const styles = StyleSheet.create({
   tagActive: {
     backgroundColor: colors.primary.DEFAULT + "15",
   },
+  tagDraft: {
+    backgroundColor: "#DBEAFE",
+  },
   tagCompleted: {
     backgroundColor: "#E5E7EB",
   },
@@ -357,6 +371,9 @@ const styles = StyleSheet.create({
   },
   tagActiveText: {
     color: colors.primary.dark,
+  },
+  tagDraftText: {
+    color: "#2563EB",
   },
   tagCompletedText: {
     color: colors.text.body,

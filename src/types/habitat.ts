@@ -27,10 +27,11 @@ export interface TargetNote {
 }
 
 export const conditionColors: Record<string, { label: string; color: string }> = {
+  excellent: { label: "Excellent", color: "#059669" },
   good: { label: "Good", color: "#16A34A" },
   moderate: { label: "Moderate", color: "#D97706" },
   poor: { label: "Poor", color: "#DC2626" },
-  degraded: { label: "Degraded", color: "#7C2D12" },
+  bad: { label: "Bad", color: "#7C2D12" },
 };
 
 export const categoryLabels: Record<string, { label: string; color: string }> = {

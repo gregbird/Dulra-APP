@@ -88,7 +88,11 @@ export default function TargetNoteDetailScreen() {
   }
 
   const cat = note.category ? categoryLabels[note.category] : null;
-  const isHigh = note.priority === "high";
+  const priorityStyle = note.priority === "high"
+    ? { bg: "#DC26261A", color: "#DC2626", label: "High Priority" }
+    : note.priority === "low"
+    ? { bg: "#2563EB1A", color: "#2563EB", label: "Low Priority" }
+    : { bg: "#6B72801A", color: "#6B7280", label: "Normal Priority" };
   const coords = note.location_text?.match(/POINT\(([-\d.]+) ([-\d.]+)\)/);
   const lng = coords?.[1];
   const lat = coords?.[2];
@@ -106,9 +110,9 @@ export default function TargetNoteDetailScreen() {
                 <Text style={[styles.tagText, { color: cat.color }]}>{cat.label}</Text>
               </View>
             )}
-            <View style={[styles.tag, { backgroundColor: isHigh ? "#DC26261A" : "#6B72801A" }]}>
-              <Text style={[styles.tagText, { color: isHigh ? "#DC2626" : "#6B7280" }]}>
-                {isHigh ? "High Priority" : "Normal Priority"}
+            <View style={[styles.tag, { backgroundColor: priorityStyle.bg }]}>
+              <Text style={[styles.tagText, { color: priorityStyle.color }]}>
+                {priorityStyle.label}
               </Text>
             </View>
             {note.is_verified && (

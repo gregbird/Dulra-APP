@@ -6,8 +6,8 @@ export interface Survey {
   survey_date: string;
   start_time: string | null;
   end_time: string | null;
-  status: "planned" | "in_progress" | "completed" | "approved";
-  sync_status: "pending" | "synced" | "failed";
+  status: "in_progress" | "completed";
+  sync_status: "pending" | "synced" | "conflict";
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -30,8 +30,6 @@ export const surveyTypeLabels: Record<string, string> = {
 };
 
 export const surveyStatusLabels: Record<string, string> = {
-  planned: "Planned",
   in_progress: "In Progress",
   completed: "Completed",
-  approved: "Approved",
 };

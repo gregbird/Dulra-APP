@@ -79,8 +79,8 @@ export default function ProjectDetailScreen() {
       if (cached) {
         setProject({
           id: cached.id, name: cached.name, site_code: cached.site_code,
-          status: (cached.status ?? "active") as "active" | "completed",
-          health_status: cached.health_status as "on_track" | "at_risk" | "overdue" | null,
+          status: (cached.status ?? "active") as Project["status"],
+          health_status: (cached.health_status ?? "on_track") as Project["health_status"],
           county: cached.county, updated_at: cached.updated_at ?? "",
         });
       }

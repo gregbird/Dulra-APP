@@ -19,10 +19,8 @@ import type { SurveyTemplate } from "@/types/survey-template";
 import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
 
 const statusColors: Record<string, string> = {
-  planned: "#2563EB",
   in_progress: colors.status.atRisk,
   completed: colors.status.onTrack,
-  approved: colors.primary.DEFAULT,
 };
 
 export default function SurveysListScreen() {
@@ -77,8 +75,8 @@ export default function SurveysListScreen() {
     setRefreshing(false);
   };
 
-  const active = surveys.filter((s) => s.status === "planned" || s.status === "in_progress");
-  const completed = surveys.filter((s) => s.status === "completed" || s.status === "approved");
+  const active = surveys.filter((s) => s.status === "in_progress");
+  const completed = surveys.filter((s) => s.status === "completed");
   const list = filter === "active" ? active : completed;
 
   const formatDate = (d: string) =>

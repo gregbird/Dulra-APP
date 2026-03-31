@@ -14,10 +14,18 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     CREATE TABLE IF NOT EXISTS db_version (version INTEGER);
   `);
   const ver = await database.getFirstAsync<{ version: number }>(`SELECT version FROM db_version LIMIT 1`);
-  if (!ver || ver.version < 3) {
-    await database.execAsync(`DROP TABLE IF EXISTS pending_surveys; DROP TABLE IF EXISTS pending_photos; DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
+  if (!ver || ver.version < 4) {
+    if (ver && ver.version === 3) {
+      await database.execAsync(`
+        UPDATE pending_surveys SET status = 'in_progress' WHERE status = 'planned';
+        UPDATE pending_surveys SET status = 'completed' WHERE status = 'approved';
+      `);
+      await database.execAsync(`DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
+    } else {
+      await database.execAsync(`DROP TABLE IF EXISTS pending_surveys; DROP TABLE IF EXISTS pending_photos; DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
+    }
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (3)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (4)`);
   }
 
   await database.execAsync(`

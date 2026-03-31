@@ -15,7 +15,11 @@ export default function TargetNotesList({ notes, refreshing, onRefresh }: Target
   const router = useRouter();
   const renderNote = ({ item }: { item: TargetNote }) => {
     const cat = item.category ? categoryLabels[item.category] : null;
-    const isHigh = item.priority === "high";
+    const priorityStyle = item.priority === "high"
+      ? { bg: "#DC26261A", color: "#DC2626", label: "High" }
+      : item.priority === "low"
+      ? { bg: "#2563EB1A", color: "#2563EB", label: "Low" }
+      : { bg: "#6B72801A", color: "#6B7280", label: "Normal" };
 
     return (
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => router.push(`/target-note/${item.id}`)}>
@@ -32,9 +36,9 @@ export default function TargetNotesList({ notes, refreshing, onRefresh }: Target
               <Text style={[styles.tagText, { color: cat.color }]}>{cat.label}</Text>
             </View>
           )}
-          <View style={[styles.tag, { backgroundColor: isHigh ? "#DC26261A" : "#6B72801A" }]}>
-            <Text style={[styles.tagText, { color: isHigh ? "#DC2626" : "#6B7280" }]}>
-              {isHigh ? "High" : "Normal"}
+          <View style={[styles.tag, { backgroundColor: priorityStyle.bg }]}>
+            <Text style={[styles.tagText, { color: priorityStyle.color }]}>
+              {priorityStyle.label}
             </Text>
           </View>
         </View>

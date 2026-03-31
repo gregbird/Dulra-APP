@@ -16,6 +16,7 @@ import type { Profile } from "@/types/project";
 const roleLabels: Record<string, { label: string; color: string }> = {
   admin: { label: "Admin", color: colors.role.admin },
   project_manager: { label: "Project Manager", color: colors.role.pm },
+  assessor: { label: "Ecologist", color: colors.role.ecologist },
   ecologist: { label: "Ecologist", color: colors.role.ecologist },
   junior: { label: "Junior Ecologist", color: colors.role.junior },
   third_party: { label: "3rd Party", color: colors.role.thirdParty },
