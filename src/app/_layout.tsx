@@ -10,6 +10,7 @@ import SyncIndicator from "@/components/sync-indicator";
 import { startNetworkListener, useNetworkStore } from "@/lib/network";
 import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
 import { cacheTemplate, cacheProject, cacheSurvey, cacheHabitat, cacheTargetNote, clearCachedData } from "@/lib/database";
+import { buildFormDataFromReleve } from "@/lib/releve-save";
 
 export default function RootLayout() {
   const [session, setSession] = useState<Session | null>(null);
@@ -55,12 +56,12 @@ export default function RootLayout() {
     });
   }, []);
 
-  const cacheAllData = async () => {
+  const cacheAllData = async (): Promise<boolean> => {
     const { isOnline } = useNetworkStore.getState();
-    if (!isOnline) return;
+    if (!isOnline) return false;
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) return false;
 
       const { data: profile } = await supabase
         .from("profiles")
@@ -90,7 +91,7 @@ export default function RootLayout() {
 
         if (projectIds.length === 0) {
           await clearCachedData();
-          return;
+          return true;
         }
       }
 
@@ -98,12 +99,14 @@ export default function RootLayout() {
       let surveyQuery = supabase.from("surveys").select("id, project_id, survey_type, survey_date, status, weather, form_data, notes");
       let habitatQuery = supabase.from("habitat_polygons").select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos");
       let targetNoteQuery = supabase.from("target_notes").select("id, project_id, category, title, description, priority, is_verified, photos, location");
+      let releveQuery = supabase.from("releve_surveys").select("*");
 
       if (projectIds) {
         projectQuery = projectQuery.in("id", projectIds);
         surveyQuery = surveyQuery.in("project_id", projectIds);
         habitatQuery = habitatQuery.in("project_id", projectIds);
         targetNoteQuery = targetNoteQuery.in("project_id", projectIds);
+        releveQuery = releveQuery.in("project_id", projectIds);
       }
 
       const results = await Promise.allSettled([
@@ -112,6 +115,7 @@ export default function RootLayout() {
         surveyQuery,
         habitatQuery,
         targetNoteQuery,
+        releveQuery,
       ]);
 
       const templates = results[0].status === "fulfilled" ? results[0].value.data : null;
@@ -119,6 +123,15 @@ export default function RootLayout() {
       const surveys = results[2].status === "fulfilled" ? results[2].value.data : null;
       const habitats = results[3].status === "fulfilled" ? results[3].value.data : null;
       const targetNotes = results[4].status === "fulfilled" ? results[4].value.data : null;
+      const releves = results[5].status === "fulfilled" ? results[5].value.data : null;
+
+      // Build releve lookup: survey_id → releve row
+      const releveMap = new Map<string, Record<string, unknown>>();
+      if (releves) {
+        for (const r of releves) {
+          releveMap.set(r.survey_id as string, r as Record<string, unknown>);
+        }
+      }
 
       if (templates || projects || surveys || habitats || targetNotes) await clearCachedData();
 
@@ -134,11 +147,20 @@ export default function RootLayout() {
       }
       if (surveys && surveys.length > 0) {
         for (const s of surveys) {
+          // For releve surveys, rebuild form_data from releve_surveys columns
+          // (web may update releve_surveys without touching surveys.form_data)
+          let formData = s.form_data as Record<string, unknown> | null;
+          if (s.survey_type === "releve_survey") {
+            const releve = releveMap.get(s.id);
+            if (releve) {
+              formData = buildFormDataFromReleve(releve, formData);
+            }
+          }
           await cacheSurvey({
             id: s.id, projectId: s.project_id, surveyType: s.survey_type,
             surveyDate: s.survey_date, status: s.status,
             weather: s.weather as Record<string, unknown> | null,
-            formData: s.form_data as Record<string, unknown> | null,
+            formData,
             notes: s.notes,
           });
         }
@@ -164,8 +186,11 @@ export default function RootLayout() {
           });
         }
       }
-    } catch { /* offline */ }
+      return surveys != null;
+    } catch { return false; }
   };
+
+  const isOnline = useNetworkStore((s) => s.isOnline);
 
   useEffect(() => {
     if (loading) return;
@@ -176,11 +201,15 @@ export default function RootLayout() {
     } else if (session && inAuthGroup) {
       router.replace("/(tabs)");
     }
-
-    if (session && !dataCached) {
-      cacheAllData().then(() => setDataCached(true));
-    }
   }, [session, loading, segments]);
+
+  // Cache all data from Supabase — retries automatically when internet comes back
+  useEffect(() => {
+    if (!session || loading || dataCached || !isOnline) return;
+    cacheAllData().then((ok) => {
+      if (ok) setDataCached(true);
+    });
+  }, [session, loading, dataCached, isOnline]);
 
   if (loading) {
     return (

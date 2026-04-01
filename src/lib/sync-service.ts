@@ -6,9 +6,10 @@ import {
   markSurveySynced,
   markPhotoSynced,
   getPendingCount,
+  cacheSurvey,
 } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
-import { insertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
+import { insertReleveSurvey, upsertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
 
 let syncing = false;
 
@@ -57,6 +58,34 @@ async function syncSurveys(): Promise<void> {
         .eq("id", survey.remote_id);
 
       if (!error) {
+        // Also update releve_surveys/species for releve type
+        if (survey.survey_type === "releve_survey") {
+          const releveFields = extractReleveFromFormData(formData as Record<string, unknown>);
+          const releveId = await upsertReleveSurvey({
+            projectId: survey.project_id,
+            surveyId: survey.remote_id,
+            surveyDate: survey.survey_date,
+            releveFields,
+            userId: survey.surveyor_id || null,
+          });
+          if (releveId) {
+            const species = extractSpeciesFromFormData(formData as Record<string, unknown>);
+            await insertReleveSpecies(releveId, species);
+          }
+        }
+
+        // Update cache so offline reads get latest synced data
+        await cacheSurvey({
+          id: survey.remote_id,
+          projectId: survey.project_id,
+          surveyType: survey.survey_type,
+          surveyDate: survey.survey_date,
+          status: survey.status,
+          weather: { templateFields: allFields },
+          formData,
+          notes: null,
+        });
+
         await markSurveySynced(survey.id);
         await updatePhotoSurveyIds(survey.id, survey.remote_id);
       }
@@ -100,6 +129,18 @@ async function syncSurveys(): Promise<void> {
             await insertReleveSpecies(releveId, species);
           }
         }
+
+        // Cache the newly synced survey for offline access
+        await cacheSurvey({
+          id: data.id,
+          projectId: survey.project_id,
+          surveyType: survey.survey_type,
+          surveyDate: survey.survey_date,
+          status: survey.status,
+          weather: { templateFields: allFields },
+          formData,
+          notes: null,
+        });
 
         await markSurveySynced(survey.id);
         await updatePhotoSurveyIds(survey.id, data.id);

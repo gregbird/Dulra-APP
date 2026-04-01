@@ -99,7 +99,11 @@ export default function ProjectDetailScreen() {
 
   const handleCreateSurvey = (template: SurveyTemplate) => {
     setPickerVisible(false);
-    router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+    if (template.survey_type === "releve_survey") {
+      router.push(`/releve-survey/new?projectId=${id}`);
+    } else {
+      router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+    }
   };
 
   const getCount = (key: string) => {
@@ -130,7 +134,13 @@ export default function ProjectDetailScreen() {
           title: project?.name ?? "Project",
           headerLeft: () => (
             <TouchableOpacity
-              onPress={() => router.back()}
+              onPress={() => {
+                if (router.canGoBack()) {
+                  router.back();
+                } else {
+                  router.replace("/(tabs)");
+                }
+              }}
               hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             >
               <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />

@@ -124,15 +124,4 @@
 
 ---
 
-## FAZ 5 — Gelecek (opsiyonel)
-
-### 5.1 Species observations
-- [ ] `species_observations` tablosu destegi — survey sirasinda tur gozlemi kaydi
-- [ ] Offline cache + sync
-
-### 5.2 Survey assignments
-- [ ] `survey_assignments` tablosu destegi — kullaniciya atanmis survey'leri filtrele
-
-### 5.3 RLS uyumlulugu
-- [ ] target_notes icin created_by fallback — proje olusturucu member degilse target note goremez sorunu
-- [ ] photos INSERT icin ayni sorun — DB tarafinda RLS duzeltmesi gerekebilir
+> **FAZ 5 kaldirildi** — Orijinal iOS requirements'ta istenmedigf icin (species_observations, survey_assignments, RLS) scope disindan cikarildi.

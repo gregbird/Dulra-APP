@@ -85,7 +85,13 @@ export default function SurveysListScreen() {
   const renderSurvey = ({ item }: { item: Survey }) => {
     const sc = statusColors[item.status] ?? colors.text.muted;
     return (
-      <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => router.push(`/survey/${item.id}`)}>
+      <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => {
+        if (item.survey_type === "releve_survey") {
+          router.push(`/releve-survey/${item.id}`);
+        } else {
+          router.push(`/survey/${item.id}`);
+        }
+      }}>
         <View style={styles.cardRow}>
           <View style={{ flex: 1 }}>
             <Text style={styles.cardTitle}>{surveyTypeLabels[item.survey_type] ?? item.survey_type}</Text>

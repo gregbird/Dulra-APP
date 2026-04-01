@@ -23,7 +23,7 @@ import HabitatPicker, { FOSSITT_LEVEL3 } from "@/components/habitat-picker";
 import SpeciesRow from "@/components/species-row";
 import { saveSurvey } from "@/lib/survey-save";
 import { getReleveDefaults } from "@/lib/releve-save";
-import { getCachedSurvey, getCachedProjects } from "@/lib/database";
+import { getCachedSurvey, getCachedProjects, getPendingSurveyByRemoteId, cacheSurvey } from "@/lib/database";
 import type { FormData } from "@/types/survey-template";
 import type { ReleveSpeciesEntry } from "@/types/releve";
 
@@ -47,6 +47,19 @@ export default function ReleveSurveyFormScreen() {
   const photosRef = useRef<SurveyPhotosHandle>(null);
   const fieldRefs = useRef<Record<string, TextInput>>({});
 
+  const restoreFromJson = (json: string | Record<string, unknown>) => {
+    const parsed = typeof json === "string" ? JSON.parse(json) : json;
+    const restored: FormData = {};
+    for (const [key, section] of Object.entries(parsed as Record<string, unknown>)) {
+      if (key === "species") {
+        if (Array.isArray(section)) setSpecies(section as ReleveSpeciesEntry[]);
+      } else if (section && typeof section === "object" && !Array.isArray(section)) {
+        restored[key] = section as Record<string, string | number | null>;
+      }
+    }
+    setFormData(restored);
+  };
+
   const loadFromCache = useCallback(async () => {
     if (isNew) {
       const cachedProjects = await getCachedProjects();
@@ -62,33 +75,48 @@ export default function ReleveSurveyFormScreen() {
         },
       });
     } else if (surveyId) {
+      // Pending (unsynced) edits take priority over cache
+      const pending = await getPendingSurveyByRemoteId(surveyId);
+      if (pending?.form_data) {
+        setProjectId(pending.project_id);
+        restoreFromJson(pending.form_data);
+        return;
+      }
       const cached = await getCachedSurvey(surveyId);
       if (cached) {
         setProjectId(cached.project_id);
-        const restored: FormData = {};
         if (cached.form_data) {
-          const parsed = JSON.parse(cached.form_data);
-          for (const [key, section] of Object.entries(parsed)) {
-            if (key === "species") {
-              if (Array.isArray(section)) setSpecies(section as ReleveSpeciesEntry[]);
-            } else if (section && typeof section === "object" && !Array.isArray(section)) {
-              restored[key] = section as Record<string, string | number | null>;
-            }
-          }
+          restoreFromJson(cached.form_data);
         }
-        setFormData(restored);
       }
     }
   }, [isNew, surveyId, projectId]);
 
   const init = useCallback(async () => {
     try {
+      // For existing surveys, check pending (unsynced) edits first — no network needed
+      if (!isNew && surveyId) {
+        const pending = await getPendingSurveyByRemoteId(surveyId);
+        if (pending?.form_data) {
+          setProjectId(pending.project_id);
+          const cachedProjects = await getCachedProjects();
+          const cp = cachedProjects.find((p) => p.id === pending.project_id);
+          if (cp) setProjectName(cp.name);
+          restoreFromJson(pending.form_data);
+          return;
+        }
+      }
+
       const { supabase } = await import("@/lib/supabase");
 
       if (isNew) {
         if (!projectId) return;
         const { data: proj } = await supabase.from("projects").select("name").eq("id", projectId).single();
-        const pName = proj?.name ?? "";
+        let pName = proj?.name ?? "";
+        if (!pName) {
+          const cachedProjects = await getCachedProjects();
+          pName = cachedProjects.find((p) => p.id === projectId)?.name ?? "";
+        }
         setProjectName(pName);
         const defaults = await getReleveDefaults({ projectId, projectName: pName });
         setFormData({
@@ -99,17 +127,24 @@ export default function ReleveSurveyFormScreen() {
           },
         });
       } else if (surveyId) {
-        const { data: survey } = await supabase
+        // Fetch survey metadata first
+        const { data: survey, error: surveyError } = await supabase
           .from("surveys")
-          .select("project_id, form_data")
+          .select("project_id, status")
           .eq("id", surveyId)
           .single();
-        if (survey) {
-          setProjectId(survey.project_id);
-          const { data: proj } = await supabase.from("projects").select("name").eq("id", survey.project_id).single();
-          if (proj) setProjectName(proj.name);
+        // Custom fetch wrapper returns 503 instead of throwing on network error,
+        // so catch block won't fire — fall back to cache explicitly
+        if (surveyError || !survey) {
+          await loadFromCache();
+          return;
         }
+        setProjectId(survey.project_id);
+        const { data: proj } = await supabase.from("projects").select("name").eq("id", survey.project_id).single();
+        if (proj) setProjectName(proj.name);
 
+        // Read from releve_surveys — web may update these columns directly
+        // without touching surveys.form_data
         const { data: releve } = await supabase
           .from("releve_surveys")
           .select("*")
@@ -126,15 +161,24 @@ export default function ReleveSurveyFormScreen() {
             }
             if (Object.keys(sectionData).length > 0) restored[section.id] = sectionData;
           }
-          setFormData(restored);
-        }
 
-        const { data: speciesData } = await supabase
-          .from("releve_species")
-          .select("species_name_latin, species_name_english, species_cover_domin, species_cover_pct, notes")
-          .eq("releve_id", releve?.id ?? "");
-        if (speciesData && speciesData.length > 0) {
-          setSpecies(speciesData);
+          const { data: speciesData } = await supabase
+            .from("releve_species")
+            .select("species_name_latin, species_name_english, species_cover_domin, species_cover_pct, notes")
+            .eq("releve_id", releve.id);
+          if (speciesData && speciesData.length > 0) {
+            setSpecies(speciesData);
+            (restored as Record<string, unknown>).species = speciesData;
+          }
+
+          setFormData(restored);
+
+          // Update cache with latest releve_surveys data for offline access
+          await cacheSurvey({
+            id: surveyId, projectId: survey.project_id, surveyType: "releve_survey",
+            surveyDate: releve.survey_date ?? new Date().toISOString().split("T")[0],
+            status: survey.status ?? "in_progress", weather: null, formData: restored, notes: null,
+          });
         }
       }
     } catch {
@@ -250,7 +294,25 @@ export default function ReleveSurveyFormScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ title: "Relev\u00E9 Survey" }} />
+      <Stack.Screen
+        options={{
+          title: "Relev\u00E9 Survey",
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => {
+                if (router.canGoBack()) {
+                  router.back();
+                } else {
+                  router.replace("/(tabs)");
+                }
+              }}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />
+            </TouchableOpacity>
+          ),
+        }}
+      />
       <KeyboardAvoidingView style={s.container} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
 

@@ -132,8 +132,24 @@ export async function saveSurveyLocally(params: {
   formData: Record<string, unknown>;
 }): Promise<string> {
   const database = await getDatabase();
-  const id = generateId();
   const now = new Date().toISOString();
+
+  // Update existing pending entry for same remote survey instead of creating duplicate
+  if (params.remoteId) {
+    const existing = await database.getFirstAsync<{ id: string }>(
+      `SELECT id FROM pending_surveys WHERE remote_id = ? AND sync_status = 'pending'`,
+      params.remoteId
+    );
+    if (existing) {
+      await database.runAsync(
+        `UPDATE pending_surveys SET status = ?, weather = ?, form_data = ?, updated_at = ? WHERE id = ?`,
+        params.status, JSON.stringify(params.weather), JSON.stringify(params.formData), now, existing.id
+      );
+      return existing.id;
+    }
+  }
+
+  const id = generateId();
 
   await database.runAsync(
     `INSERT INTO pending_surveys (id, remote_id, project_id, survey_type, surveyor_id, survey_date, status, weather, form_data, sync_status, created_at, updated_at)
@@ -158,6 +174,20 @@ export async function updateSurveyLocally(params: {
     `UPDATE pending_surveys SET status = ?, weather = ?, form_data = ?, updated_at = ? WHERE id = ?`,
     params.status, JSON.stringify(params.weather),
     JSON.stringify(params.formData), new Date().toISOString(), params.id
+  );
+}
+
+export async function getPendingSurveyByRemoteId(remoteId: string): Promise<{
+  id: string;
+  remote_id: string | null;
+  project_id: string;
+  survey_type: string;
+  form_data: string | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(
+    `SELECT id, remote_id, project_id, survey_type, form_data FROM pending_surveys WHERE remote_id = ? AND sync_status = 'pending' ORDER BY updated_at DESC LIMIT 1`,
+    remoteId
   );
 }
 

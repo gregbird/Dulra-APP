@@ -254,12 +254,24 @@ export default function SurveyFormScreen() {
   if (!template || sections.length === 0) {
     return (
       <>
-        <Stack.Screen options={{ title }} />
+        <Stack.Screen
+          options={{
+            title,
+            headerLeft: () => (
+              <TouchableOpacity
+                onPress={() => router.canGoBack() ? router.back() : router.replace("/(tabs)")}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />
+              </TouchableOpacity>
+            ),
+          }}
+        />
         <View style={styles.center}>
           <Ionicons name="construct-outline" size={48} color={colors.text.muted} />
           <Text style={styles.emptyTitle}>Coming Soon</Text>
           <Text style={styles.emptyText}>This survey type is not yet available on mobile.</Text>
-          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <TouchableOpacity style={styles.backButton} onPress={() => router.canGoBack() ? router.back() : router.replace("/(tabs)")}>
             <Text style={styles.backButtonText}>Go Back</Text></TouchableOpacity>
         </View>
       </>
@@ -268,7 +280,19 @@ export default function SurveyFormScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ title }} />
+      <Stack.Screen
+        options={{
+          title,
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => router.canGoBack() ? router.back() : router.replace("/(tabs)")}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />
+            </TouchableOpacity>
+          ),
+        }}
+      />
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === "ios" ? "padding" : undefined}

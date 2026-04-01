@@ -1,6 +1,33 @@
 import { supabase } from "@/lib/supabase";
 import { extractReleveFields } from "@/types/releve";
 import type { ReleveData, ReleveSpeciesEntry } from "@/types/releve";
+import { RELEVE_SECTIONS } from "@/constants/releve-data";
+
+/**
+ * Build a FormData-shaped object from a releve_surveys row.
+ * Groups flat columns back into sections using RELEVE_SECTIONS.
+ * Used to keep cache in sync when web updates releve_surveys
+ * without touching surveys.form_data.
+ */
+export function buildFormDataFromReleve(
+  releve: Record<string, unknown>,
+  existingFormData?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const result: Record<string, Record<string, string | number | null>> = {};
+  for (const section of RELEVE_SECTIONS) {
+    const sectionData: Record<string, string | number | null> = {};
+    for (const field of section.fields) {
+      const val = releve[field.key];
+      if (val != null) sectionData[field.key] = val as string | number;
+    }
+    if (Object.keys(sectionData).length > 0) result[section.id] = sectionData;
+  }
+  // Preserve species from existing form_data (releve_species is a separate table)
+  if (existingFormData?.species) {
+    (result as Record<string, unknown>).species = existingFormData.species;
+  }
+  return result;
+}
 
 /**
  * Insert a record into the releve_surveys table.
