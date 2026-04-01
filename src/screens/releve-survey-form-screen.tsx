@@ -23,14 +23,14 @@ import HabitatPicker, { FOSSITT_LEVEL3 } from "@/components/habitat-picker";
 import SpeciesRow from "@/components/species-row";
 import { saveSurvey } from "@/lib/survey-save";
 import { getReleveDefaults } from "@/lib/releve-save";
-import { getCachedSurvey, getCachedProjects, getPendingSurveyByRemoteId, cacheSurvey } from "@/lib/database";
+import { getCachedSurvey, getCachedProjects, getPendingSurveyByRemoteId, cacheSurvey, getCachedProjectSites } from "@/lib/database";
 import type { FormData } from "@/types/survey-template";
 import type { ReleveSpeciesEntry } from "@/types/releve";
 
 /* ── Main screen ────────────────────────────────────────────── */
 
 export default function ReleveSurveyFormScreen() {
-  const params = useLocalSearchParams<{ id: string; projectId?: string }>();
+  const params = useLocalSearchParams<{ id: string; projectId?: string; siteId?: string }>();
   const router = useRouter();
   const isNew = params.id === "new";
   const [surveyId, setSurveyId] = useState<string | null>(isNew ? null : params.id);
@@ -60,13 +60,23 @@ export default function ReleveSurveyFormScreen() {
     setFormData(restored);
   };
 
+  const getSiteName = useCallback(async (): Promise<string | null> => {
+    if (!params.siteId) return null;
+    try {
+      const sites = await getCachedProjectSites(projectId);
+      const site = sites.find((s) => s.id === params.siteId);
+      return site?.site_name || site?.site_code || null;
+    } catch { return null; }
+  }, [params.siteId, projectId]);
+
   const loadFromCache = useCallback(async () => {
     if (isNew) {
       const cachedProjects = await getCachedProjects();
       const cachedProj = cachedProjects.find((p) => p.id === projectId);
       const pName = cachedProj?.name ?? "";
       setProjectName(pName);
-      const defaults = await getReleveDefaults({ projectId, projectName: pName });
+      const siteName = await getSiteName();
+      const defaults = await getReleveDefaults({ projectId, projectName: pName, siteName });
       setFormData({
         basic: {
           releve_code: defaults.releve_code,
@@ -118,7 +128,8 @@ export default function ReleveSurveyFormScreen() {
           pName = cachedProjects.find((p) => p.id === projectId)?.name ?? "";
         }
         setProjectName(pName);
-        const defaults = await getReleveDefaults({ projectId, projectName: pName });
+        const siteName = await getSiteName();
+        const defaults = await getReleveDefaults({ projectId, projectName: pName, siteName });
         setFormData({
           basic: {
             releve_code: defaults.releve_code,
@@ -257,6 +268,7 @@ export default function ReleveSurveyFormScreen() {
       formData: fullFormData,
       markComplete,
       pendingPhotoUris: pendingUris,
+      siteId: params.siteId ?? null,
     });
 
     if (result.offline) {

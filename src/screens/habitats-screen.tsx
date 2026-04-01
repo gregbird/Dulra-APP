@@ -8,7 +8,7 @@ import HabitatList from "@/components/habitat-list";
 import type { HabitatPolygon } from "@/types/habitat";
 
 export default function HabitatsScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, siteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
   const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -16,18 +16,21 @@ export default function HabitatsScreen() {
   const fetchHabitats = useCallback(async () => {
     if (!id) return;
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("habitat_polygons")
-        .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation")
+        .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, site_id")
         .eq("project_id", id)
         .order("fossitt_code");
+      if (siteId) query = query.or(`site_id.eq.${siteId},site_id.is.null`);
+      const { data, error } = await query;
       if (error) throw error;
-      if (data) setHabitats(data);
+      if (data) setHabitats(data as HabitatPolygon[]);
     } catch {
-      const cached = await getCachedHabitats(id);
+      let cached = await getCachedHabitats(id);
+      if (siteId) cached = cached.filter((h) => h.site_id === siteId || h.site_id === null);
       if (cached.length > 0) setHabitats(cached as HabitatPolygon[]);
     }
-  }, [id]);
+  }, [id, siteId]);
 
   useEffect(() => {
     fetchHabitats().finally(() => setLoading(false));

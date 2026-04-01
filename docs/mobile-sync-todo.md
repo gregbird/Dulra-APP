@@ -22,9 +22,9 @@
 - [x] `src/types/survey.ts` — `sync_status` tipinden `"failed"` kaldirildi → `"conflict"` eklendi
 
 ### 1.3 SQLite pending veri migrasyonu ✓
-> DB version 3 → 4. Eski pending survey'lerdeki `planned` → `in_progress`, `approved` → `completed` olarak migrate edildi. Cache tablolari yeniden olusturulacak. Pending survey/photo verileri korunuyor.
+> Eski pending survey'lerdeki `planned` → `in_progress`, `approved` → `completed` olarak migrate edildi. Cache tablolari yeniden olusturulacak. Pending survey/photo verileri korunuyor. (Guncel DB version: 5 — Faz 3 migration'i ile yukseltildi.)
 
-- [x] `src/lib/database.ts` — DB version 4'e yukseltildi, migration'da: pending_surveys'de `status = 'planned'` → `'in_progress'`, `status = 'approved'` → `'completed'` olarak guncellendi, cache tablolari temizlendi
+- [x] `src/lib/database.ts` — migration'da: pending_surveys'de `status = 'planned'` → `'in_progress'`, `status = 'approved'` → `'completed'` olarak guncellendi, cache tablolari temizlendi
 
 ---
 
@@ -62,32 +62,45 @@
 
 ---
 
-## FAZ 3 — Multi-site altyapi (project_sites)
+## FAZ 3 — Multi-site altyapi (project_sites) ✓
 
-### 3.1 SQLite cache tablosu
-- [ ] `src/lib/database.ts` — `cached_project_sites` tablosu olustur (id, project_id, site_code, site_name, sort_order, county, cached_at)
-- [ ] `src/lib/database.ts` — `cacheProjectSite()`, `getCachedProjectSites(projectId)` fonksiyonlari ekle
-- [ ] `src/lib/database.ts` — mevcut cache tablolarina `site_id` kolonu ekle: `cached_surveys`, `cached_habitats`, `cached_target_notes`
-- [ ] `src/lib/database.ts` — DB version artir, migration ekle
+### 3.1 SQLite cache tablosu ✓
+> DB version 4 → 5. Mevcut tablolara ALTER TABLE ile site_id eklendi, yeni cached_project_sites tablosu olusturuldu. Yeni kurulumlar icin CREATE TABLE'lar da guncellendi.
 
-### 3.2 Cache akisina project_sites ekle
-- [ ] `src/app/_layout.tsx` — `cacheAllData()` icinde `project_sites` sorgusunu ekle
-- [ ] `src/app/_layout.tsx` — survey/habitat/target_notes cache sorgularina `site_id` kolonu ekle
+- [x] `src/lib/database.ts` — `cached_project_sites` tablosu olusturuldu (id, project_id, site_code, site_name, sort_order, county, cached_at)
+- [x] `src/lib/database.ts` — `cacheProjectSite()`, `getCachedProjectSites(projectId)` fonksiyonlari eklendi
+- [x] `src/lib/database.ts` — mevcut cache tablolarina `site_id` kolonu eklendi: `cached_surveys`, `cached_habitats`, `cached_target_notes`
+- [x] `src/lib/database.ts` — DB version 5'e yukseltildi, v4→v5 migration eklendi
 
-### 3.3 Survey olusturmada site_id destegi
-- [ ] `src/lib/survey-save.ts` — `SaveParams`'a `siteId` ekle, INSERT'e `site_id` gonder
-- [ ] `src/lib/sync-service.ts` — sync INSERT'e `site_id` ekle
-- [ ] `src/lib/database.ts` — `pending_surveys` tablosuna `site_id` kolonu ekle, `saveSurveyLocally`'e `siteId` parametresi ekle
+### 3.2 Cache akisina project_sites ekle ✓
+> cacheAllData() icinde project_sites sorgusu eklendi, tum cache yazimlarinda site_id iletiliyor.
 
-### 3.4 Proje detayinda site secim UI
-- [ ] `src/screens/project-detail-screen.tsx` — projenin site'larini cek ve goster
-- [ ] Birden fazla site varsa site secim komponenti goster
-- [ ] Secili site'i survey/habitat/target-notes ekranlarina parametre olarak gec
+- [x] `src/app/_layout.tsx` — `cacheAllData()` icinde `project_sites` sorgusu eklendi
+- [x] `src/app/_layout.tsx` — survey/habitat/target_notes cache sorgularina `site_id` kolonu eklendi
 
-### 3.5 Listeleri site bazli filtrele
-- [ ] `src/screens/surveys-list-screen.tsx` — `site_id` filtresi ekle (secili site veya tumu)
-- [ ] `src/screens/habitats-screen.tsx` — `site_id` filtresi ekle (`site_id = :siteId OR site_id IS NULL`)
-- [ ] `src/screens/target-notes-screen.tsx` — `site_id` filtresi ekle (`site_id = :siteId OR site_id IS NULL`)
+### 3.3 Survey olusturmada site_id destegi ✓
+> SaveParams'a siteId eklendi. Online INSERT, offline save ve sync akisinda site_id Supabase'e gonderiliyor.
+
+- [x] `src/lib/survey-save.ts` — `SaveParams`'a `siteId` eklendi, INSERT'e `site_id` gonderiliyor
+- [x] `src/lib/sync-service.ts` — sync INSERT'e `site_id` eklendi
+- [x] `src/lib/database.ts` — `pending_surveys` tablosuna `site_id` kolonu eklendi, `saveSurveyLocally`'e `siteId` parametresi eklendi
+
+### 3.4 Proje detayinda site secim UI ✓
+> SitePicker dropdown/modal component olusturuldu. effectiveSiteId mantigi: 0 site → null, 1 site → otomatik, 1+ site → kullanici secimi. Multi-site projede "All Sites" seciliyken survey olusturma engelleniyor.
+
+- [x] `src/components/site-picker.tsx` — dropdown selector olusturuldu (basinca fullscreen modal ile site listesi acilir)
+- [x] `src/screens/project-detail-screen.tsx` — projenin site'lari cekilip gosteriliyor
+- [x] Birden fazla site varsa site secim komponenti gorunuyor
+- [x] Secili site'i survey/habitat/target-notes ekranlarina parametre olarak geciliyor
+- [x] Multi-site projede site secilmeden survey olusturma engelleniyor (Alert)
+- [x] Tek site projede otomatik site_id atamasi yapiliyor
+
+### 3.5 Listeleri site bazli filtrele ✓
+> Tum list ekranlarinda siteId URL parametresi alinip Supabase sorgularina ve cache fallback filtresine uygulanıyor.
+
+- [x] `src/screens/surveys-list-screen.tsx` — `site_id` filtresi eklendi (`.eq` — eski survey'ler sadece "All Sites"de gorunur)
+- [x] `src/screens/habitats-screen.tsx` — `site_id` filtresi eklendi (`.or("site_id.eq.X,site_id.is.null")`)
+- [x] `src/screens/target-notes-screen.tsx` — `site_id` filtresi eklendi (`.or("site_id.eq.X,site_id.is.null")`)
 
 ---
 
@@ -114,7 +127,7 @@
 
 - [x] `src/lib/releve-save.ts` — `getReleveDefaults({ projectId, projectName })` fonksiyonu: survey_date (bugun), recorder (profiles.full_name), releve_code (`REL ${101 + count}`), site_name (proje adi)
 - [x] releve_code hesabi: Supabase'den `SELECT COUNT(*) FROM releve_surveys WHERE project_id` + SQLite'dan pending releve survey sayisi
-- [x] site_id henuz yok (Faz 3 bekliyor), site_name olarak proje adi kullaniliyor
+- [x] site_id destegi Faz 3 ile eklendi, siteId varsa site_name olarak site ismi kullaniliyor (yoksa proje adi fallback)
 
 ### 4.4 Offline sync ✓
 > 4.1 ve 4.2 ile birlikte yapildi. Sync akisinda `survey_type === "releve_survey"` kontrolu ile chain INSERT eklendi. Ayri migration gerekmedi — releve verileri mevcut pending_surveys.form_data JSON'unda saklanip sync sirasinda parse ediliyor.

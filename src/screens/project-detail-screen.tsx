@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -13,9 +13,10 @@ import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
-import { getCachedSurveys, getCachedProjects, getCachedHabitats, getCachedTargetNotes } from "@/lib/database";
+import { getCachedSurveys, getCachedProjects, getCachedHabitats, getCachedTargetNotes, getCachedProjectSites } from "@/lib/database";
 import SurveyTypePicker from "@/components/survey-type-picker";
-import type { Project } from "@/types/project";
+import SitePicker from "@/components/site-picker";
+import type { Project, ProjectSite } from "@/types/project";
 import type { SurveyTemplate } from "@/types/survey-template";
 
 interface SectionCount {
@@ -35,34 +36,49 @@ export default function ProjectDetailScreen() {
   const router = useRouter();
   const [project, setProject] = useState<Project | null>(null);
   const [counts, setCounts] = useState<SectionCount>({ surveys: 0, habitats: 0, targetNotes: 0 });
+  const [sites, setSites] = useState<ProjectSite[]>([]);
+  const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
 
+  const effectiveSiteId = useMemo(() => {
+    if (sites.length === 0) return null;
+    if (sites.length === 1) return sites[0].id;
+    return selectedSiteId;
+  }, [sites, selectedSiteId]);
+
   const fetchData = useCallback(async () => {
     if (!id) return;
     try {
-      const [projectRes, surveysRes, habitatsRes, notesRes] = await Promise.all([
+      let surveyCountQuery = supabase.from("surveys").select("id", { count: "exact", head: true }).eq("project_id", id);
+      let habitatCountQuery = supabase.from("habitat_polygons").select("id", { count: "exact", head: true }).eq("project_id", id);
+      let targetNoteCountQuery = supabase.from("target_notes").select("id", { count: "exact", head: true }).eq("project_id", id);
+
+      if (effectiveSiteId) {
+        surveyCountQuery = surveyCountQuery.eq("site_id", effectiveSiteId);
+        habitatCountQuery = habitatCountQuery.or(`site_id.eq.${effectiveSiteId},site_id.is.null`);
+        targetNoteCountQuery = targetNoteCountQuery.or(`site_id.eq.${effectiveSiteId},site_id.is.null`);
+      }
+
+      const [projectRes, surveysRes, habitatsRes, notesRes, sitesRes] = await Promise.all([
         supabase
           .from("projects")
           .select("id, name, site_code, status, health_status, county, updated_at")
           .eq("id", id)
           .single(),
+        surveyCountQuery,
+        habitatCountQuery,
+        targetNoteCountQuery,
         supabase
-          .from("surveys")
-          .select("id", { count: "exact", head: true })
-          .eq("project_id", id),
-        supabase
-          .from("habitat_polygons")
-          .select("id", { count: "exact", head: true })
-          .eq("project_id", id),
-        supabase
-          .from("target_notes")
-          .select("id", { count: "exact", head: true })
-          .eq("project_id", id),
+          .from("project_sites")
+          .select("id, project_id, site_code, site_name, sort_order, county")
+          .eq("project_id", id)
+          .order("sort_order"),
       ]);
       if (projectRes.error) throw projectRes.error;
       if (projectRes.data) setProject(projectRes.data);
+      if (sitesRes.data) setSites(sitesRes.data);
       setCounts({
         surveys: surveysRes.count ?? 0,
         habitats: habitatsRes.count ?? 0,
@@ -70,10 +86,14 @@ export default function ProjectDetailScreen() {
       });
     } catch {
       if (!id) return;
-      const [cachedSurveys, cachedHabitats, cachedNotes] = await Promise.all([
-        getCachedSurveys(id), getCachedHabitats(id), getCachedTargetNotes(id),
+      const [cachedSurveys, cachedHabitats, cachedNotes, cachedSites] = await Promise.all([
+        getCachedSurveys(id), getCachedHabitats(id), getCachedTargetNotes(id), getCachedProjectSites(id),
       ]);
-      setCounts({ surveys: cachedSurveys.length, habitats: cachedHabitats.length, targetNotes: cachedNotes.length });
+      setSites(cachedSites as ProjectSite[]);
+      const filteredSurveys = effectiveSiteId ? cachedSurveys.filter((s) => s.site_id === effectiveSiteId) : cachedSurveys;
+      const filteredHabitats = effectiveSiteId ? cachedHabitats.filter((h) => h.site_id === effectiveSiteId || h.site_id === null) : cachedHabitats;
+      const filteredNotes = effectiveSiteId ? cachedNotes.filter((n) => n.site_id === effectiveSiteId || n.site_id === null) : cachedNotes;
+      setCounts({ surveys: filteredSurveys.length, habitats: filteredHabitats.length, targetNotes: filteredNotes.length });
       const allProjects = await getCachedProjects();
       const cached = allProjects.find((p) => p.id === id);
       if (cached) {
@@ -85,7 +105,7 @@ export default function ProjectDetailScreen() {
         });
       }
     }
-  }, [id]);
+  }, [id, effectiveSiteId]);
 
   useEffect(() => {
     fetchData().finally(() => setLoading(false));
@@ -97,12 +117,21 @@ export default function ProjectDetailScreen() {
     setRefreshing(false);
   };
 
+  const handleNewSurvey = () => {
+    if (sites.length > 1 && effectiveSiteId === null) {
+      Alert.alert("Select a Site", "Please select a site before starting a new survey.");
+      return;
+    }
+    setPickerVisible(true);
+  };
+
   const handleCreateSurvey = (template: SurveyTemplate) => {
     setPickerVisible(false);
+    const siteParam = effectiveSiteId ? `&siteId=${effectiveSiteId}` : "";
     if (template.survey_type === "releve_survey") {
-      router.push(`/releve-survey/new?projectId=${id}`);
+      router.push(`/releve-survey/new?projectId=${id}${siteParam}`);
     } else {
-      router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+      router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}${siteParam}`);
     }
   };
 
@@ -114,9 +143,10 @@ export default function ProjectDetailScreen() {
   };
 
   const handleSectionPress = (key: string) => {
-    if (key === "surveys") router.push(`/project/${id}/surveys`);
-    if (key === "habitats") router.push(`/project/${id}/habitats`);
-    if (key === "notes") router.push(`/project/${id}/target-notes`);
+    const siteParam = effectiveSiteId ? `?siteId=${effectiveSiteId}` : "";
+    if (key === "surveys") router.push(`/project/${id}/surveys${siteParam}`);
+    if (key === "habitats") router.push(`/project/${id}/habitats${siteParam}`);
+    if (key === "notes") router.push(`/project/${id}/target-notes${siteParam}`);
   };
 
   if (loading) {
@@ -171,6 +201,11 @@ export default function ProjectDetailScreen() {
                 </View>
               )}
             </View>
+            <SitePicker
+              sites={sites}
+              selectedSiteId={selectedSiteId}
+              onSelect={setSelectedSiteId}
+            />
           </View>
         )}
 
@@ -200,7 +235,7 @@ export default function ProjectDetailScreen() {
         <TouchableOpacity
           style={styles.newSurveyButton}
           activeOpacity={0.8}
-          onPress={() => setPickerVisible(true)}
+          onPress={handleNewSurvey}
         >
           <Ionicons name="add" size={24} color={colors.white} />
           <Text style={styles.newSurveyText}>Start New Survey</Text>

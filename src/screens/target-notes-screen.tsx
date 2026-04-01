@@ -8,7 +8,7 @@ import TargetNotesList from "@/components/target-notes-list";
 import type { TargetNote } from "@/types/habitat";
 
 export default function TargetNotesScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, siteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
   const [notes, setNotes] = useState<TargetNote[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -16,18 +16,21 @@ export default function TargetNotesScreen() {
   const fetchNotes = useCallback(async () => {
     if (!id) return;
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("target_notes")
-        .select("id, project_id, category, title, description, priority, is_verified")
+        .select("id, project_id, category, title, description, priority, is_verified, site_id")
         .eq("project_id", id)
         .order("priority");
+      if (siteId) query = query.or(`site_id.eq.${siteId},site_id.is.null`);
+      const { data, error } = await query;
       if (error) throw error;
-      if (data) setNotes(data);
+      if (data) setNotes(data as TargetNote[]);
     } catch {
-      const cached = await getCachedTargetNotes(id);
+      let cached = await getCachedTargetNotes(id);
+      if (siteId) cached = cached.filter((n) => n.site_id === siteId || n.site_id === null);
       if (cached.length > 0) setNotes(cached as TargetNote[]);
     }
-  }, [id]);
+  }, [id, siteId]);
 
   useEffect(() => {
     fetchNotes().finally(() => setLoading(false));

@@ -94,6 +94,7 @@ export async function upsertReleveSurvey(params: {
 export async function getReleveDefaults(params: {
   projectId: string;
   projectName: string;
+  siteName?: string | null;
 }): Promise<{
   releve_code: string;
   recorder: string;
@@ -139,7 +140,7 @@ export async function getReleveDefaults(params: {
     releve_code: `REL ${101 + existingCount}`,
     recorder,
     survey_date: surveyDate,
-    site_name: params.projectName,
+    site_name: params.siteName ?? params.projectName,
   };
 }
 

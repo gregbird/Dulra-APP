@@ -12,6 +12,7 @@ export interface HabitatPolygon {
   listed_species: string[] | null;
   threats: string[] | null;
   photos: string[] | null;
+  site_id?: string | null;
 }
 
 export interface TargetNote {
@@ -24,6 +25,7 @@ export interface TargetNote {
   is_verified: boolean;
   location_text?: string | null;
   photos: string[] | null;
+  site_id?: string | null;
 }
 
 export const conditionColors: Record<string, { label: string; color: string }> = {

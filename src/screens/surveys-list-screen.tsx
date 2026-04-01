@@ -24,7 +24,7 @@ const statusColors: Record<string, string> = {
 };
 
 export default function SurveysListScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, siteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
   const router = useRouter();
   const [surveys, setSurveys] = useState<Survey[]>([]);
   const [filter, setFilter] = useState<"active" | "completed">("active");
@@ -35,11 +35,13 @@ export default function SurveysListScreen() {
   const fetchSurveys = useCallback(async () => {
     if (!id) return;
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from("surveys")
-        .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, weather, form_data, created_at, updated_at")
+        .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, weather, form_data, created_at, updated_at, site_id")
         .eq("project_id", id)
         .order("survey_date", { ascending: false });
+      if (siteId) query = query.eq("site_id", siteId);
+      const { data, error } = await query;
       if (error) throw error;
       if (data) {
         setSurveys(data);
@@ -50,11 +52,13 @@ export default function SurveysListScreen() {
             weather: s.weather as Record<string, unknown> | null,
             formData: s.form_data as Record<string, unknown> | null,
             notes: s.notes,
+            siteId: s.site_id as string | null,
           });
         }
       }
     } catch {
-      const cached = await getCachedSurveys(id);
+      let cached = await getCachedSurveys(id);
+      if (siteId) cached = cached.filter((c) => c.site_id === siteId);
       if (cached.length > 0) {
         setSurveys(cached.map((c) => ({
           ...c, surveyor_id: null, start_time: null, end_time: null,
@@ -63,7 +67,7 @@ export default function SurveysListScreen() {
         })));
       }
     }
-  }, [id]);
+  }, [id, siteId]);
 
   useEffect(() => {
     fetchSurveys().finally(() => setLoading(false));
@@ -160,10 +164,11 @@ export default function SurveysListScreen() {
           onClose={() => setPickerVisible(false)}
           onSelect={(template: SurveyTemplate) => {
             setPickerVisible(false);
+            const siteParam = siteId ? `&siteId=${siteId}` : "";
             if (template.survey_type === "releve_survey") {
-              router.push(`/releve-survey/new?projectId=${id}`);
+              router.push(`/releve-survey/new?projectId=${id}${siteParam}`);
             } else {
-              router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}`);
+              router.push(`/survey/new?projectId=${id}&surveyType=${template.survey_type}${siteParam}`);
             }
           }}
         />

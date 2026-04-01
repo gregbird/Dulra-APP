@@ -13,6 +13,7 @@ interface SaveParams {
   formData: FormData;
   markComplete: boolean;
   pendingPhotoUris: string[];
+  siteId?: string | null;
 }
 
 interface SaveResult {
@@ -34,6 +35,7 @@ async function saveOffline(params: SaveParams, status: string, allFields: Record
     projectId: params.projectId, surveyType: params.surveyType, surveyorId: userId,
     surveyDate: new Date().toISOString().split("T")[0],
     status, weather: { templateFields: allFields }, formData: params.formData,
+    siteId: params.siteId,
   });
 
   // Mevcut survey düzenleniyorsa cache'i de güncelle
@@ -42,6 +44,7 @@ async function saveOffline(params: SaveParams, status: string, allFields: Record
       id: params.surveyId, projectId: params.projectId, surveyType: params.surveyType,
       surveyDate: new Date().toISOString().split("T")[0],
       status, weather: { templateFields: allFields }, formData: params.formData, notes: null,
+      siteId: params.siteId,
     });
   }
 
@@ -75,6 +78,7 @@ export async function saveSurvey(params: SaveParams): Promise<SaveResult> {
           project_id: projectId, survey_type: surveyType, surveyor_id: user.id,
           survey_date: new Date().toISOString().split("T")[0], status,
           sync_status: "synced", weather: { templateFields: allFields }, form_data: formData,
+          site_id: params.siteId ?? null,
         })
         .select("id")
         .single();
@@ -129,6 +133,7 @@ export async function saveSurvey(params: SaveParams): Promise<SaveResult> {
       await cacheSurvey({
         id: currentId, projectId, surveyType, surveyDate: new Date().toISOString().split("T")[0],
         status, weather: { templateFields: allFields }, formData, notes: null,
+        siteId: params.siteId,
       });
     }
 

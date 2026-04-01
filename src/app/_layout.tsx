@@ -9,7 +9,7 @@ import WatermarkEngine from "@/components/watermark-engine";
 import SyncIndicator from "@/components/sync-indicator";
 import { startNetworkListener, useNetworkStore } from "@/lib/network";
 import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
-import { cacheTemplate, cacheProject, cacheSurvey, cacheHabitat, cacheTargetNote, clearCachedData } from "@/lib/database";
+import { cacheTemplate, cacheProject, cacheSurvey, cacheHabitat, cacheTargetNote, cacheProjectSite, clearCachedData } from "@/lib/database";
 import { buildFormDataFromReleve } from "@/lib/releve-save";
 
 export default function RootLayout() {
@@ -96,10 +96,11 @@ export default function RootLayout() {
       }
 
       let projectQuery = supabase.from("projects").select("id, name, site_code, status, health_status, county, updated_at").order("updated_at", { ascending: false });
-      let surveyQuery = supabase.from("surveys").select("id, project_id, survey_type, survey_date, status, weather, form_data, notes");
-      let habitatQuery = supabase.from("habitat_polygons").select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos");
-      let targetNoteQuery = supabase.from("target_notes").select("id, project_id, category, title, description, priority, is_verified, photos, location");
+      let surveyQuery = supabase.from("surveys").select("id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id");
+      let habitatQuery = supabase.from("habitat_polygons").select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id");
+      let targetNoteQuery = supabase.from("target_notes").select("id, project_id, category, title, description, priority, is_verified, photos, location, site_id");
       let releveQuery = supabase.from("releve_surveys").select("*");
+      let sitesQuery = supabase.from("project_sites").select("id, project_id, site_code, site_name, sort_order, county").order("sort_order");
 
       if (projectIds) {
         projectQuery = projectQuery.in("id", projectIds);
@@ -107,6 +108,7 @@ export default function RootLayout() {
         habitatQuery = habitatQuery.in("project_id", projectIds);
         targetNoteQuery = targetNoteQuery.in("project_id", projectIds);
         releveQuery = releveQuery.in("project_id", projectIds);
+        sitesQuery = sitesQuery.in("project_id", projectIds);
       }
 
       const results = await Promise.allSettled([
@@ -116,6 +118,7 @@ export default function RootLayout() {
         habitatQuery,
         targetNoteQuery,
         releveQuery,
+        sitesQuery,
       ]);
 
       const templates = results[0].status === "fulfilled" ? results[0].value.data : null;
@@ -124,6 +127,7 @@ export default function RootLayout() {
       const habitats = results[3].status === "fulfilled" ? results[3].value.data : null;
       const targetNotes = results[4].status === "fulfilled" ? results[4].value.data : null;
       const releves = results[5].status === "fulfilled" ? results[5].value.data : null;
+      const sites = results[6].status === "fulfilled" ? results[6].value.data : null;
 
       // Build releve lookup: survey_id → releve row
       const releveMap = new Map<string, Record<string, unknown>>();
@@ -133,7 +137,7 @@ export default function RootLayout() {
         }
       }
 
-      if (templates || projects || surveys || habitats || targetNotes) await clearCachedData();
+      if (templates || projects || surveys || habitats || targetNotes || sites) await clearCachedData();
 
       if (templates && templates.length > 0) {
         for (const t of templates) {
@@ -162,6 +166,7 @@ export default function RootLayout() {
             weather: s.weather as Record<string, unknown> | null,
             formData,
             notes: s.notes,
+            siteId: s.site_id as string | null,
           });
         }
       }
@@ -172,6 +177,7 @@ export default function RootLayout() {
             areaHectares: h.area_hectares, condition: h.condition, notes: h.notes, euAnnexCode: h.eu_annex_code,
             surveyMethod: h.survey_method, evaluation: h.evaluation,
             listedSpecies: h.listed_species as string[] | null, threats: h.threats as string[] | null, photos: h.photos as string[] | null,
+            siteId: h.site_id as string | null,
           });
         }
       }
@@ -183,6 +189,15 @@ export default function RootLayout() {
             id: n.id, projectId: n.project_id, category: n.category, title: n.title,
             description: n.description, priority: n.priority, isVerified: n.is_verified,
             locationText, photos: n.photos as string[] | null,
+            siteId: n.site_id as string | null,
+          });
+        }
+      }
+      if (sites && sites.length > 0) {
+        for (const site of sites) {
+          await cacheProjectSite({
+            id: site.id, projectId: site.project_id, siteCode: site.site_code,
+            siteName: site.site_name, sortOrder: site.sort_order, county: site.county,
           });
         }
       }

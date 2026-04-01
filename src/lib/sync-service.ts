@@ -84,6 +84,7 @@ async function syncSurveys(): Promise<void> {
           weather: { templateFields: allFields },
           formData,
           notes: null,
+          siteId: survey.site_id,
         });
 
         await markSurveySynced(survey.id);
@@ -110,6 +111,7 @@ async function syncSurveys(): Promise<void> {
           local_id: survey.id,
           weather: { templateFields: allFields },
           form_data: formData,
+          site_id: survey.site_id ?? null,
         })
         .select("id")
         .single();
@@ -140,6 +142,7 @@ async function syncSurveys(): Promise<void> {
           weather: { templateFields: allFields },
           formData,
           notes: null,
+          siteId: survey.site_id,
         });
 
         await markSurveySynced(survey.id);

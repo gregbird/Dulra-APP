@@ -64,7 +64,7 @@ function SectionFields({
 }
 
 export default function SurveyFormScreen() {
-  const params = useLocalSearchParams<{ id: string; projectId?: string; surveyType?: string }>();
+  const params = useLocalSearchParams<{ id: string; projectId?: string; surveyType?: string; siteId?: string }>();
   const router = useRouter();
   const isNew = params.id === "new";
   const [surveyId, setSurveyId] = useState<string | null>(isNew ? null : params.id);
@@ -210,6 +210,7 @@ export default function SurveyFormScreen() {
     const result = await saveSurvey({
       surveyId, projectId, projectName, surveyType,
       formData, markComplete, pendingPhotoUris: pendingUris,
+      siteId: params.siteId ?? null,
     });
 
     if (result.offline) {

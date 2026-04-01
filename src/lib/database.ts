@@ -25,7 +25,28 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       await database.execAsync(`DROP TABLE IF EXISTS pending_surveys; DROP TABLE IF EXISTS pending_photos; DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
     }
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (4)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (5)`);
+  }
+
+  if (ver && ver.version === 4) {
+    await database.execAsync(`
+      ALTER TABLE cached_surveys ADD COLUMN site_id TEXT;
+      ALTER TABLE cached_habitats ADD COLUMN site_id TEXT;
+      ALTER TABLE cached_target_notes ADD COLUMN site_id TEXT;
+      ALTER TABLE pending_surveys ADD COLUMN site_id TEXT;
+    `);
+    await database.execAsync(`
+      CREATE TABLE IF NOT EXISTS cached_project_sites (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        site_code TEXT NOT NULL,
+        site_name TEXT,
+        sort_order INTEGER,
+        county TEXT,
+        cached_at TEXT NOT NULL
+      );
+    `);
+    await database.runAsync(`UPDATE db_version SET version = 5`);
   }
 
   await database.execAsync(`
@@ -39,6 +60,7 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       status TEXT NOT NULL DEFAULT 'in_progress',
       weather TEXT,
       form_data TEXT,
+      site_id TEXT,
       sync_status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -82,6 +104,7 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       weather TEXT,
       form_data TEXT,
       notes TEXT,
+      site_id TEXT,
       cached_at TEXT NOT NULL
     );
 
@@ -99,6 +122,7 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       listed_species TEXT,
       threats TEXT,
       photos TEXT,
+      site_id TEXT,
       cached_at TEXT NOT NULL
     );
 
@@ -112,6 +136,17 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       is_verified INTEGER DEFAULT 0,
       location_text TEXT,
       photos TEXT,
+      site_id TEXT,
+      cached_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cached_project_sites (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      site_code TEXT NOT NULL,
+      site_name TEXT,
+      sort_order INTEGER,
+      county TEXT,
       cached_at TEXT NOT NULL
     );
   `);
@@ -130,6 +165,7 @@ export async function saveSurveyLocally(params: {
   status: string;
   weather: Record<string, unknown>;
   formData: Record<string, unknown>;
+  siteId?: string | null;
 }): Promise<string> {
   const database = await getDatabase();
   const now = new Date().toISOString();
@@ -142,8 +178,8 @@ export async function saveSurveyLocally(params: {
     );
     if (existing) {
       await database.runAsync(
-        `UPDATE pending_surveys SET status = ?, weather = ?, form_data = ?, updated_at = ? WHERE id = ?`,
-        params.status, JSON.stringify(params.weather), JSON.stringify(params.formData), now, existing.id
+        `UPDATE pending_surveys SET status = ?, weather = ?, form_data = ?, site_id = ?, updated_at = ? WHERE id = ?`,
+        params.status, JSON.stringify(params.weather), JSON.stringify(params.formData), params.siteId ?? null, now, existing.id
       );
       return existing.id;
     }
@@ -152,12 +188,12 @@ export async function saveSurveyLocally(params: {
   const id = generateId();
 
   await database.runAsync(
-    `INSERT INTO pending_surveys (id, remote_id, project_id, survey_type, surveyor_id, survey_date, status, weather, form_data, sync_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    `INSERT INTO pending_surveys (id, remote_id, project_id, survey_type, surveyor_id, survey_date, status, weather, form_data, site_id, sync_status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     id, params.remoteId ?? null, params.projectId, params.surveyType, params.surveyorId,
     params.surveyDate, params.status,
     JSON.stringify(params.weather), JSON.stringify(params.formData),
-    now, now
+    params.siteId ?? null, now, now
   );
 
   return id;
@@ -202,6 +238,7 @@ export async function getPendingSurveys(): Promise<Array<{
   weather: string;
   form_data: string;
   sync_status: string;
+  site_id: string | null;
 }>> {
   const database = await getDatabase();
   return database.getAllAsync(
@@ -299,24 +336,25 @@ export async function cacheSurvey(params: {
   weather: Record<string, unknown> | null;
   formData: Record<string, unknown> | null;
   notes: string | null;
+  siteId?: string | null;
 }): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_surveys (id, project_id, survey_type, survey_date, status, weather, form_data, notes, cached_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO cached_surveys (id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id, cached_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     params.id, params.projectId, params.surveyType, params.surveyDate,
     params.status, JSON.stringify(params.weather),
-    JSON.stringify(params.formData), params.notes, new Date().toISOString()
+    JSON.stringify(params.formData), params.notes, params.siteId ?? null, new Date().toISOString()
   );
 }
 
 export async function getCachedSurveys(projectId: string): Promise<Array<{
   id: string; project_id: string; survey_type: string; survey_date: string;
-  status: string; notes: string | null;
+  status: string; notes: string | null; site_id: string | null;
 }>> {
   const database = await getDatabase();
   return database.getAllAsync(
-    `SELECT id, project_id, survey_type, survey_date, status, notes FROM cached_surveys WHERE project_id = ? ORDER BY survey_date DESC`,
+    `SELECT id, project_id, survey_type, survey_date, status, notes, site_id FROM cached_surveys WHERE project_id = ? ORDER BY survey_date DESC`,
     projectId
   );
 }
@@ -355,11 +393,12 @@ export async function cacheHabitat(params: {
   areaHectares: number | null; condition: string | null; notes: string | null;
   euAnnexCode: string | null; surveyMethod: string | null; evaluation: string | null;
   listedSpecies: string[] | null; threats: string[] | null; photos: string[] | null;
+  siteId?: string | null;
 }): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_habitats (id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    params.id, params.projectId, params.fossittCode, params.fossittName, params.areaHectares, params.condition, params.notes, params.euAnnexCode, params.surveyMethod, params.evaluation, JSON.stringify(params.listedSpecies), JSON.stringify(params.threats), JSON.stringify(params.photos), new Date().toISOString()
+    `INSERT OR REPLACE INTO cached_habitats (id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.projectId, params.fossittCode, params.fossittName, params.areaHectares, params.condition, params.notes, params.euAnnexCode, params.surveyMethod, params.evaluation, JSON.stringify(params.listedSpecies), JSON.stringify(params.threats), JSON.stringify(params.photos), params.siteId ?? null, new Date().toISOString()
   );
 }
 
@@ -367,9 +406,10 @@ export async function getCachedHabitats(projectId: string): Promise<Array<{
   id: string; project_id: string; fossitt_code: string | null; fossitt_name: string | null;
   area_hectares: number | null; condition: string | null; notes: string | null;
   eu_annex_code: string | null; survey_method: string | null; evaluation: string | null;
+  site_id: string | null;
 }>> {
   const database = await getDatabase();
-  return database.getAllAsync(`SELECT id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation FROM cached_habitats WHERE project_id = ? ORDER BY fossitt_code`, projectId);
+  return database.getAllAsync(`SELECT id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, site_id FROM cached_habitats WHERE project_id = ? ORDER BY fossitt_code`, projectId);
 }
 
 export async function getCachedHabitat(habitatId: string): Promise<{
@@ -386,20 +426,22 @@ export async function cacheTargetNote(params: {
   id: string; projectId: string; category: string | null; title: string;
   description: string | null; priority: string | null; isVerified: boolean;
   locationText: string | null; photos: string[] | null;
+  siteId?: string | null;
 }): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_target_notes (id, project_id, category, title, description, priority, is_verified, location_text, photos, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    params.id, params.projectId, params.category, params.title, params.description, params.priority, params.isVerified ? 1 : 0, params.locationText, JSON.stringify(params.photos), new Date().toISOString()
+    `INSERT OR REPLACE INTO cached_target_notes (id, project_id, category, title, description, priority, is_verified, location_text, photos, site_id, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.projectId, params.category, params.title, params.description, params.priority, params.isVerified ? 1 : 0, params.locationText, JSON.stringify(params.photos), params.siteId ?? null, new Date().toISOString()
   );
 }
 
 export async function getCachedTargetNotes(projectId: string): Promise<Array<{
   id: string; project_id: string; category: string | null; title: string;
   description: string | null; priority: string | null; is_verified: boolean;
+  site_id: string | null;
 }>> {
   const database = await getDatabase();
-  const rows = await database.getAllAsync<{ id: string; project_id: string; category: string | null; title: string; description: string | null; priority: string | null; is_verified: number }>(`SELECT id, project_id, category, title, description, priority, is_verified FROM cached_target_notes WHERE project_id = ? ORDER BY priority`, projectId);
+  const rows = await database.getAllAsync<{ id: string; project_id: string; category: string | null; title: string; description: string | null; priority: string | null; is_verified: number; site_id: string | null }>(`SELECT id, project_id, category, title, description, priority, is_verified, site_id FROM cached_target_notes WHERE project_id = ? ORDER BY priority`, projectId);
   return rows.map((r) => ({ ...r, is_verified: r.is_verified === 1 }));
 }
 
@@ -411,9 +453,31 @@ export async function getCachedTargetNote(noteId: string): Promise<{
   return database.getFirstAsync(`SELECT * FROM cached_target_notes WHERE id = ?`, noteId);
 }
 
+export async function cacheProjectSite(params: {
+  id: string; projectId: string; siteCode: string;
+  siteName: string | null; sortOrder: number | null; county: string | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO cached_project_sites (id, project_id, site_code, site_name, sort_order, county, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.projectId, params.siteCode, params.siteName, params.sortOrder, params.county, new Date().toISOString()
+  );
+}
+
+export async function getCachedProjectSites(projectId: string): Promise<Array<{
+  id: string; project_id: string; site_code: string;
+  site_name: string | null; sort_order: number | null; county: string | null;
+}>> {
+  const database = await getDatabase();
+  return database.getAllAsync(
+    `SELECT id, project_id, site_code, site_name, sort_order, county FROM cached_project_sites WHERE project_id = ? ORDER BY sort_order`,
+    projectId
+  );
+}
+
 export async function clearCachedData(): Promise<void> {
   const database = await getDatabase();
-  await database.execAsync(`DELETE FROM cached_projects; DELETE FROM cached_surveys; DELETE FROM cached_templates; DELETE FROM cached_habitats; DELETE FROM cached_target_notes;`);
+  await database.execAsync(`DELETE FROM cached_projects; DELETE FROM cached_surveys; DELETE FROM cached_templates; DELETE FROM cached_habitats; DELETE FROM cached_target_notes; DELETE FROM cached_project_sites;`);
 }
 
 export async function getPendingCount(): Promise<number> {

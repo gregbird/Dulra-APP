@@ -23,3 +23,12 @@ export interface Profile {
   role: "admin" | "assessor" | "project_manager" | "ecologist" | "junior" | "third_party" | "client";
   organization_id: string;
 }
+
+export interface ProjectSite {
+  id: string;
+  project_id: string;
+  site_code: string;
+  site_name: string | null;
+  sort_order: number | null;
+  county: string | null;
+}

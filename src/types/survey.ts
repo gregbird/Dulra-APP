@@ -12,6 +12,7 @@ export interface Survey {
   created_at: string;
   updated_at: string;
   surveyor_name?: string;
+  site_id?: string | null;
 }
 
 export const surveyTypeLabels: Record<string, string> = {
