@@ -4,13 +4,50 @@ import {
   getPendingSurveys,
   getPendingPhotos,
   markSurveySynced,
+  markSurveyConflict,
+  recordSurveyRetryFailure,
   markPhotoSynced,
   recordPhotoRetryFailure,
+  sweepStuckPhotos,
   getPendingCount,
   cacheSurvey,
 } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
 import { insertReleveSurvey, upsertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
+
+// Postgres error codes and HTTP statuses that mean "no amount of retries will
+// make this row sync" — RLS rejections, constraint violations, missing FKs.
+// We mark these as 'conflict' so they stop inflating the pending counter and
+// the user can see them in DevTool → Inspect Pending to decide what to do.
+const PERMANENT_PG_CODES = new Set([
+  "42501", // insufficient_privilege (RLS)
+  "23503", // foreign_key_violation
+  "23505", // unique_violation
+  "23514", // check_violation
+  "22P02", // invalid_text_representation (bad UUID etc.)
+  "23502", // not_null_violation
+]);
+
+interface SupabaseLikeError {
+  message?: string;
+  code?: string;
+  status?: number;
+  details?: string;
+}
+
+function isPermanentFailure(error: SupabaseLikeError | null | undefined): boolean {
+  if (!error) return false;
+  if (error.code && PERMANENT_PG_CODES.has(error.code)) return true;
+  // Supabase-js surfaces RLS / auth as HTTP status too.
+  if (error.status === 401 || error.status === 403) return true;
+  return false;
+}
+
+function errorSummary(error: SupabaseLikeError | null | undefined): string {
+  if (!error) return "unknown";
+  const code = error.code ? `[${error.code}] ` : "";
+  return `${code}${error.message ?? error.details ?? "unknown error"}`;
+}
 
 // Promise-based lock: multiple triggers (SyncIndicator, network listener, AppState)
 // can race before `syncing = true` is committed. Holding the in-flight promise
@@ -25,6 +62,10 @@ export async function syncPendingData(): Promise<void> {
   syncPromise = (async () => {
     useNetworkStore.getState().setSyncing(true);
     try {
+      // Cleanup pass first: photos at max retry or with a dead parent go to
+      // 'conflict' so the pending count can drop to 0 instead of staying
+      // stuck forever pointing at items sync physically can't finish.
+      await sweepStuckPhotos();
       await syncSurveys();
       await syncPhotos();
     } finally {
@@ -64,7 +105,14 @@ async function syncSurveys(): Promise<void> {
         })
         .eq("id", survey.remote_id);
 
-      if (error) continue;
+      if (error) {
+        if (isPermanentFailure(error)) {
+          await markSurveyConflict(survey.id, errorSummary(error));
+        } else {
+          await recordSurveyRetryFailure(survey.id, errorSummary(error));
+        }
+        continue;
+      }
 
       if (survey.survey_type === "releve_survey") {
         try {
@@ -141,7 +189,14 @@ async function syncSurveys(): Promise<void> {
           .select("id")
           .single();
 
-        if (error || !data) continue;
+        if (error || !data) {
+          if (isPermanentFailure(error)) {
+            await markSurveyConflict(survey.id, errorSummary(error));
+          } else {
+            await recordSurveyRetryFailure(survey.id, errorSummary(error ?? { message: "insert returned no data" }));
+          }
+          continue;
+        }
         remoteId = data.id as string;
       } else {
         // Existing remote row from a prior partial sync — refresh its contents
@@ -217,7 +272,9 @@ async function syncPhotos(): Promise<void> {
 
   for (const photo of pending) {
     // Photos without a remote survey_id yet — surveys sync has not completed
-    // mapping local→remote. Next sync pass will pick them up.
+    // mapping local→remote, or the parent survey is in 'conflict' state and
+    // will never get a remote id. In the latter case the photo is orphaned
+    // forever; user can clean via DevTool → Drop Conflicts.
     if (!photo.survey_id) continue;
 
     try {
@@ -241,6 +298,9 @@ async function syncPhotos(): Promise<void> {
 }
 
 export async function refreshPendingCount(): Promise<void> {
+  // Cheap stuck-item cleanup on every count refresh so the sync indicator
+  // doesn't sit at "1 pending" when the queue only contains un-syncable rows.
+  try { await sweepStuckPhotos(); } catch { /* non-fatal */ }
   const count = await getPendingCount();
   useNetworkStore.getState().setPendingCount(count);
 }

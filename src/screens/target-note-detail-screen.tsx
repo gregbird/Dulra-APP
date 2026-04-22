@@ -6,8 +6,9 @@ import {
   StyleSheet,
   ActivityIndicator,
   Dimensions,
+  TouchableOpacity,
 } from "react-native";
-import { useLocalSearchParams, Stack } from "expo-router";
+import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
@@ -17,6 +18,7 @@ import PhotoViewer from "@/components/photo-viewer";
 
 interface NoteDetail {
   id: string;
+  project_id: string;
   category: string | null;
   title: string;
   description: string | null;
@@ -33,6 +35,7 @@ const imageWidth = Dimensions.get("window").width - (screenPadding * 2) - (cardP
 
 export default function TargetNoteDetailScreen() {
   const { noteId } = useLocalSearchParams<{ noteId: string }>();
+  const router = useRouter();
   const [note, setNote] = useState<NoteDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -42,7 +45,7 @@ export default function TargetNoteDetailScreen() {
       try {
         const { data, error } = await supabase
           .from("target_notes")
-          .select("id, category, title, description, priority, is_verified, photos, location")
+          .select("id, project_id, category, title, description, priority, is_verified, photos, location")
           .eq("id", noteId)
           .single();
         if (error) throw error;
@@ -59,7 +62,7 @@ export default function TargetNoteDetailScreen() {
         const cached = await getCachedTargetNote(noteId);
         if (cached) {
           setNote({
-            id: cached.id, category: cached.category, title: cached.title,
+            id: cached.id, project_id: cached.project_id, category: cached.category, title: cached.title,
             description: cached.description, priority: cached.priority,
             is_verified: cached.is_verified === 1, location_text: cached.location_text,
             photos: cached.photos ? JSON.parse(cached.photos) : null,
@@ -99,7 +102,22 @@ export default function TargetNoteDetailScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ title: "Target Note" }} />
+      <Stack.Screen
+        options={{
+          title: "Target Note",
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => {
+                if (router.canGoBack()) router.back();
+                else router.replace(`/project/${note.project_id}/target-notes`);
+              }}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />
+            </TouchableOpacity>
+          ),
+        }}
+      />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         <View style={styles.card}>
           <Text style={styles.title}>{note.title}</Text>

@@ -6,8 +6,9 @@ import {
   StyleSheet,
   ActivityIndicator,
   Dimensions,
+  TouchableOpacity,
 } from "react-native";
-import { useLocalSearchParams, Stack } from "expo-router";
+import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
@@ -15,6 +16,7 @@ import { getCachedHabitat } from "@/lib/database";
 import { conditionColors } from "@/types/habitat";
 import type { HabitatPolygon } from "@/types/habitat";
 import PhotoViewer from "@/components/photo-viewer";
+import { getFossittColor } from "@/lib/fossitt-utils";
 
 const cardPadding = 20;
 const screenPadding = 16;
@@ -23,6 +25,7 @@ const imageWidth = Dimensions.get("window").width - (screenPadding * 2) - (cardP
 
 export default function HabitatDetailScreen() {
   const { habitatId } = useLocalSearchParams<{ habitatId: string }>();
+  const router = useRouter();
   const [habitat, setHabitat] = useState<HabitatPolygon | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -70,16 +73,32 @@ export default function HabitatDetailScreen() {
   }
 
   const cond = habitat.condition ? conditionColors[habitat.condition] : null;
+  const fossittColor = getFossittColor(habitat.fossitt_code);
 
   return (
     <>
-      <Stack.Screen options={{ title: habitat.fossitt_name ?? "Habitat" }} />
+      <Stack.Screen
+        options={{
+          title: habitat.fossitt_name ?? "Habitat",
+          headerLeft: () => (
+            <TouchableOpacity
+              onPress={() => {
+                if (router.canGoBack()) router.back();
+                else router.replace(`/project/${habitat.project_id}/habitats`);
+              }}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="chevron-back" size={28} color={colors.primary.DEFAULT} />
+            </TouchableOpacity>
+          ),
+        }}
+      />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         <View style={styles.card}>
           <View style={styles.headerRow}>
             {habitat.fossitt_code && (
-              <View style={styles.codeBadge}>
-                <Text style={styles.codeText}>{habitat.fossitt_code}</Text>
+              <View style={[styles.codeBadge, { backgroundColor: fossittColor + "22", borderColor: fossittColor + "55" }]}>
+                <Text style={[styles.codeText, { color: fossittColor }]}>{habitat.fossitt_code}</Text>
               </View>
             )}
             <Text style={styles.title}>{habitat.fossitt_name ?? "Unknown"}</Text>
@@ -185,6 +204,7 @@ const styles = StyleSheet.create({
   codeBadge: {
     backgroundColor: colors.primary.DEFAULT + "15",
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
+    borderWidth: 1, borderColor: "transparent",
   },
   codeText: { fontSize: 18, fontWeight: "700", color: colors.primary.dark },
   title: { fontSize: 22, fontWeight: "700", color: colors.text.heading, flex: 1, lineHeight: 28 },

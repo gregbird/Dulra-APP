@@ -14,7 +14,7 @@ import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { cacheTemplate, getCachedTemplates } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
-import type { SurveyTemplate } from "@/types/survey-template";
+import { FALLBACK_SURVEY_TYPES, type SurveyTemplate } from "@/types/survey-template";
 
 const RELEVE_ENTRY: SurveyTemplate = {
   id: "releve_survey",
@@ -23,6 +23,20 @@ const RELEVE_ENTRY: SurveyTemplate = {
   is_active: true,
   default_fields: { sections: [] },
 };
+
+/**
+ * Merge DB templates with the fallback list so every known survey type
+ * appears in the picker, even if the org's DB rows are missing.
+ * DB rows win — fallback only fills gaps.
+ */
+function mergeWithFallback(dbList: SurveyTemplate[]): SurveyTemplate[] {
+  const seen = new Set(dbList.map((t) => t.survey_type));
+  const merged = [...dbList];
+  for (const f of FALLBACK_SURVEY_TYPES) {
+    if (!seen.has(f.survey_type)) merged.push(f);
+  }
+  return merged.sort((a, b) => a.name.localeCompare(b.name));
+}
 
 interface SurveyTypePickerProps {
   visible: boolean;
@@ -52,16 +66,17 @@ export default function SurveyTypePicker({
           .eq("is_active", true)
           .order("name");
 
-        if (data) {
-          const hasReleve = data.some((t) => t.survey_type === "releve_survey");
-          setTemplates(hasReleve ? data : [...data, RELEVE_ENTRY]);
-          for (const t of data) {
-            await cacheTemplate({
-              surveyType: t.survey_type,
-              name: t.name,
-              defaultFields: t.default_fields ?? {},
-            });
-          }
+        const dbList = data ?? [];
+        const withReleve = dbList.some((t) => t.survey_type === "releve_survey")
+          ? dbList
+          : [...dbList, RELEVE_ENTRY];
+        setTemplates(mergeWithFallback(withReleve));
+        for (const t of dbList) {
+          await cacheTemplate({
+            surveyType: t.survey_type,
+            name: t.name,
+            defaultFields: t.default_fields ?? {},
+          });
         }
       } else {
         const cached = await getCachedTemplates();
@@ -72,8 +87,10 @@ export default function SurveyTypePicker({
           is_active: true,
           default_fields: JSON.parse(c.default_fields),
         }));
-        const hasReleve = list.some((t) => t.survey_type === "releve_survey");
-        setTemplates(hasReleve ? list : [...list, RELEVE_ENTRY]);
+        const withReleve = list.some((t) => t.survey_type === "releve_survey")
+          ? list
+          : [...list, RELEVE_ENTRY];
+        setTemplates(mergeWithFallback(withReleve));
       }
 
       setLoading(false);

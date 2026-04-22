@@ -27,9 +27,19 @@ export default function RootLayout() {
       .catch(() => setSession(null))
       .finally(() => setLoading(false));
 
+    let lastUserId: string | null = null;
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setSession(session);
+      (_event, nextSession) => {
+        setSession(nextSession);
+        // Reset the cache-populated flag only when the user id actually
+        // changes (sign-in, account switch, sign-out). Token refreshes
+        // fire the same event but keep the same user — we don't want to
+        // re-run the full cacheAllData every refresh cycle.
+        const nextUserId = nextSession?.user?.id ?? null;
+        if (nextUserId !== lastUserId) {
+          lastUserId = nextUserId;
+          setDataCached(false);
+        }
       }
     );
 

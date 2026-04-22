@@ -13,13 +13,15 @@ import NetInfo from "@react-native-community/netinfo";
 import { Ionicons } from "@expo/vector-icons";
 import { useGlobalSearchParams, usePathname } from "expo-router";
 import { supabase } from "@/lib/supabase";
-import { colors } from "@/constants/colors";
 import { useDevEventStore } from "@/lib/dev-events";
 import { useNetworkStore } from "@/lib/network";
 import { clearCachedData, clearPendingData } from "@/lib/database";
 import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
 import { cacheAllData } from "@/lib/cache-refresh";
-import { createOneSurvey, createTestHabitat, createTestTargetNote } from "@/lib/dev-actions";
+import {
+  createOneSurvey, createTestHabitat, createTestTargetNote,
+  inspectPending, dropAllConflicts,
+} from "@/lib/dev-actions";
 import { surveyTypeLabels } from "@/types/survey";
 import { devToolStyles as s } from "@/components/dev-tool-styles";
 
@@ -102,6 +104,30 @@ export default function DevTool() {
     ]);
   };
 
+  const handleClearAndSignOut = () => {
+    Alert.alert(
+      "Clear Cache & Sign Out",
+      "Wipes ALL local data (cache + pending + conflicts) and signs you out. Use this before switching to a different account so the next user starts clean.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Clear & Sign Out",
+          style: "destructive",
+          onPress: async () => {
+            setMenuVisible(false);
+            await clearCachedData();
+            await clearPendingData();
+            await refreshPendingCount();
+            // signOut last: auth state change triggers the redirect; by then
+            // the SQLite is already empty so the login screen won't briefly
+            // flash with stale counts.
+            await supabase.auth.signOut();
+          },
+        },
+      ],
+    );
+  };
+
   const handleWipeAll = () => {
     Alert.alert(
       "Wipe All Local",
@@ -137,6 +163,32 @@ export default function DevTool() {
   const handleAddTestPhotos = () => {
     requestAddPhotos();
     setMenuVisible(false);
+  };
+
+  const handleInspectPending = async () => {
+    setMenuVisible(false);
+    const report = await inspectPending();
+    Alert.alert("Pending Queue", report);
+  };
+
+  const handleDropConflicts = async () => {
+    Alert.alert(
+      "Drop Conflicts",
+      "Remove all locally-queued items marked as conflict (e.g. RLS-rejected by Supabase). This does NOT affect remote data.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Drop",
+          style: "destructive",
+          onPress: async () => {
+            setMenuVisible(false);
+            const { surveys, photos } = await dropAllConflicts();
+            await refreshPendingCount();
+            Alert.alert("Done", `Removed ${surveys} surveys and ${photos} photos.`);
+          },
+        },
+      ],
+    );
   };
 
   const handleForceSync = async () => {
@@ -279,7 +331,7 @@ export default function DevTool() {
             <Text style={s.menuTitle}>Dev Tools</Text>
 
             <ScrollView style={s.menuScroll} contentContainerStyle={s.menuScrollContent} showsVerticalScrollIndicator={false}>
-              <Text style={s.sectionLabel}>Form</Text>
+              <Text style={[s.sectionLabel, s.sectionLabelFirst]}>Form</Text>
               <TouchableOpacity
                 style={[s.menuItem, !isOnForm && s.menuItemDisabled]}
                 onPress={handleFillForm}
@@ -311,6 +363,20 @@ export default function DevTool() {
                 <Text style={[s.menuItemText, s.menuItemTextSecondary]}>
                   Force Sync Now ({pendingCount} pending)
                 </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary]}
+                onPress={handleInspectPending}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary]}>Inspect Pending Queue</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary]}
+                onPress={handleDropConflicts}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary]}>Drop Conflicted Items</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[s.menuItem, s.menuItemSecondary, devForcedOffline && s.menuItemWarn]}
@@ -374,11 +440,14 @@ export default function DevTool() {
               </TouchableOpacity>
 
               <Text style={s.sectionLabel}>System</Text>
+              <TouchableOpacity style={s.menuItem} onPress={handleClearAndSignOut} activeOpacity={0.7}>
+                <Text style={s.menuItemText}>Clear Cache & Sign Out</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={s.menuItem} onPress={handleLogout} activeOpacity={0.7}>
-                <Text style={s.menuItemText}>Sign Out</Text>
+                <Text style={s.menuItemText}>Sign Out (keep local)</Text>
               </TouchableOpacity>
               <TouchableOpacity style={s.menuItem} onPress={handleWipeAll} activeOpacity={0.7}>
-                <Text style={s.menuItemText}>Wipe All Local</Text>
+                <Text style={s.menuItemText}>Wipe All Local (stay in)</Text>
               </TouchableOpacity>
             </ScrollView>
 
@@ -387,9 +456,7 @@ export default function DevTool() {
               onPress={() => setMenuVisible(false)}
               activeOpacity={0.7}
             >
-              <Text style={[s.menuItemText, { color: colors.text.muted }]}>
-                Close
-              </Text>
+              <Text style={[s.menuItemText, s.menuItemTextClose]}>Close</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>

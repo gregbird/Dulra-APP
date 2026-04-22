@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/colors";
 import type { HabitatPolygon } from "@/types/habitat";
 import { conditionColors } from "@/types/habitat";
+import { getFossittColor } from "@/lib/fossitt-utils";
 
 interface HabitatListProps {
   habitats: HabitatPolygon[];
@@ -15,13 +16,14 @@ export default function HabitatList({ habitats, refreshing, onRefresh }: Habitat
   const router = useRouter();
   const renderHabitat = ({ item }: { item: HabitatPolygon }) => {
     const cond = item.condition ? conditionColors[item.condition] : null;
+    const fossittColor = getFossittColor(item.fossitt_code);
 
     return (
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => router.push(`/habitat/${item.id}`)}>
         <View style={styles.cardHeader}>
           {item.fossitt_code && (
-            <View style={styles.codeBadge}>
-              <Text style={styles.codeText}>{item.fossitt_code}</Text>
+            <View style={[styles.codeBadge, { backgroundColor: fossittColor + "22", borderColor: fossittColor + "55" }]}>
+              <Text style={[styles.codeText, { color: fossittColor }]}>{item.fossitt_code}</Text>
             </View>
           )}
           <Text style={styles.name} numberOfLines={2}>
@@ -103,6 +105,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "transparent",
   },
   codeText: {
     fontSize: 14,

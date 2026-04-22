@@ -24,19 +24,13 @@ async function initTables(database: SQLite.SQLiteDatabase) {
   const ver = await database.getFirstAsync<{ version: number }>(`SELECT version FROM db_version LIMIT 1`);
   const currentVer = ver?.version ?? 0;
 
+  // ==== Version-gated data transformations ====
+  // Only things that can't be idempotent live here: enum migrations and
+  // DROPs of stale cache tables whose schemas changed. Column ADDs happen
+  // in the safety pass below instead — otherwise a silent ALTER failure
+  // would be papered over by a version bump and the missing column would
+  // bite us at query time.
   if (currentVer < 5) {
-    // Preserve pending data on every upgrade path. Only cache_* tables may be rebuilt
-    // (they refill from Supabase on next online session). Never DROP pending_surveys
-    // or pending_photos — those contain unsynced field work.
-    await tryAddColumn(database, "pending_surveys", "remote_id", "TEXT");
-    await tryAddColumn(database, "pending_surveys", "site_id", "TEXT");
-    await tryAddColumn(database, "cached_surveys", "site_id", "TEXT");
-    await tryAddColumn(database, "cached_habitats", "site_id", "TEXT");
-    await tryAddColumn(database, "cached_target_notes", "site_id", "TEXT");
-    await tryAddColumn(database, "pending_photos", "retry_count", "INTEGER DEFAULT 0");
-    await tryAddColumn(database, "pending_photos", "last_error", "TEXT");
-
-    // Enum migration is safe at any version — UPDATE is a no-op if values don't exist.
     try {
       await database.execAsync(`
         UPDATE pending_surveys SET status = 'in_progress' WHERE status = 'planned';
@@ -44,6 +38,8 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       `);
     } catch { /* pending_surveys may not exist on first run — CREATE below handles it */ }
 
+    // Old cached_* schemas diverge from the current ones. Safe to drop:
+    // next online session refills from Supabase. pending_* is preserved.
     await database.execAsync(`
       DROP TABLE IF EXISTS cached_templates;
       DROP TABLE IF EXISTS cached_surveys;
@@ -51,31 +47,6 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       DROP TABLE IF EXISTS cached_habitats;
       DROP TABLE IF EXISTS cached_target_notes;
     `);
-
-    await database.execAsync(`
-      CREATE TABLE IF NOT EXISTS cached_project_sites (
-        id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        site_code TEXT NOT NULL,
-        site_name TEXT,
-        sort_order INTEGER,
-        county TEXT,
-        cached_at TEXT NOT NULL
-      );
-    `);
-
-    await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (5)`);
-  }
-
-  if (currentVer < 6) {
-    // Earlier v5 builds shipped without these pending_photos columns; the
-    // ALTERs in the v5 block were added later, so users already on v5 skip them.
-    // tryAddColumn is idempotent — safe to re-run for users who already have them.
-    await tryAddColumn(database, "pending_photos", "retry_count", "INTEGER NOT NULL DEFAULT 0");
-    await tryAddColumn(database, "pending_photos", "last_error", "TEXT");
-    await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (6)`);
   }
 
   await database.execAsync(`
@@ -91,6 +62,8 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       form_data TEXT,
       site_id TEXT,
       sync_status TEXT NOT NULL DEFAULT 'pending',
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -188,6 +161,42 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       cached_at TEXT NOT NULL
     );
   `);
+
+  // ==== Column safety pass — idempotent, runs every startup ====
+  // CREATE TABLE IF NOT EXISTS above leaves existing tables untouched, so
+  // columns added in later releases must be grafted on separately. Running
+  // this every launch makes the schema self-healing: if an earlier migration
+  // dropped mid-way, or an older build created a table without a column we
+  // now rely on, we fix it here instead of limping on a stale version row.
+  //
+  // All ADD COLUMNs must be nullable (or have a simple literal DEFAULT) —
+  // SQLite refuses ALTER TABLE ADD COLUMN NOT NULL unless the default is a
+  // non-null constant, and historic edge cases make NOT NULL risky on
+  // tables that already hold rows. The stricter constraint lives only in
+  // the CREATE TABLE definitions for fresh installs.
+  await tryAddColumn(database, "pending_surveys", "remote_id", "TEXT");
+  await tryAddColumn(database, "pending_surveys", "site_id", "TEXT");
+  await tryAddColumn(database, "pending_surveys", "retry_count", "INTEGER DEFAULT 0");
+  await tryAddColumn(database, "pending_surveys", "last_error", "TEXT");
+  await tryAddColumn(database, "cached_surveys", "site_id", "TEXT");
+  await tryAddColumn(database, "cached_habitats", "site_id", "TEXT");
+  await tryAddColumn(database, "cached_target_notes", "site_id", "TEXT");
+  await tryAddColumn(database, "pending_photos", "retry_count", "INTEGER DEFAULT 0");
+  await tryAddColumn(database, "pending_photos", "last_error", "TEXT");
+  try {
+    await database.runAsync(`UPDATE pending_surveys SET retry_count = 0 WHERE retry_count IS NULL`);
+  } catch { /* column not yet added on very old schema */ }
+  // Existing rows created before retry_count existed end up as NULL with a
+  // bare ADD COLUMN ... DEFAULT 0; backfill them so `retry_count < ?` in
+  // getPendingPhotos doesn't silently skip legitimate retries.
+  try {
+    await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
+  } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
+
+  if (currentVer < 6) {
+    await database.runAsync(`DELETE FROM db_version`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (6)`);
+  }
 }
 
 function generateId(): string {
@@ -291,6 +300,87 @@ export async function markSurveySynced(localId: string): Promise<void> {
   );
 }
 
+export async function markSurveyConflict(localId: string, errorMessage: string): Promise<void> {
+  const database = await getDatabase();
+  const msg = errorMessage.slice(0, 500);
+  await database.runAsync(
+    `UPDATE pending_surveys SET sync_status = 'conflict', last_error = ? WHERE id = ?`,
+    msg, localId
+  );
+  // Cascade: photos attached to a conflicted survey will never get a remote
+  // survey_id — mark them as conflict too so getPendingCount stops inflating.
+  await database.runAsync(
+    `UPDATE pending_photos SET sync_status = 'conflict', last_error = ? WHERE survey_local_id = ? AND sync_status = 'pending'`,
+    `parent survey conflict: ${msg}`, localId
+  );
+}
+
+export async function recordSurveyRetryFailure(localId: string, errorMessage: string): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE pending_surveys SET retry_count = COALESCE(retry_count, 0) + 1, last_error = ? WHERE id = ?`,
+    errorMessage.slice(0, 500), localId
+  );
+}
+
+export interface PendingInspectRow {
+  id: string;
+  remote_id: string | null;
+  project_id: string;
+  survey_type: string;
+  sync_status: string;
+  retry_count: number | null;
+  last_error: string | null;
+  created_at: string;
+}
+
+export async function getAllPendingSurveys(): Promise<PendingInspectRow[]> {
+  const database = await getDatabase();
+  return database.getAllAsync(
+    `SELECT id, remote_id, project_id, survey_type, sync_status, retry_count, last_error, created_at
+     FROM pending_surveys WHERE sync_status != 'synced' ORDER BY created_at DESC`
+  );
+}
+
+export interface PendingPhotoInspectRow {
+  id: string;
+  survey_id: string | null;
+  survey_local_id: string | null;
+  sync_status: string;
+  retry_count: number | null;
+  last_error: string | null;
+  created_at: string;
+}
+
+export async function getAllPendingPhotos(): Promise<PendingPhotoInspectRow[]> {
+  const database = await getDatabase();
+  return database.getAllAsync(
+    `SELECT id, survey_id, survey_local_id, sync_status, retry_count, last_error, created_at
+     FROM pending_photos WHERE sync_status != 'synced' ORDER BY created_at DESC`
+  );
+}
+
+export async function dropConflictedSurveys(): Promise<number> {
+  const database = await getDatabase();
+  const before = await database.getFirstAsync<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM pending_surveys WHERE sync_status = 'conflict'`
+  );
+  await database.runAsync(`DELETE FROM pending_surveys WHERE sync_status = 'conflict'`);
+  return before?.n ?? 0;
+}
+
+export async function dropConflictedPhotos(): Promise<number> {
+  const database = await getDatabase();
+  const before = await database.getFirstAsync<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM pending_photos WHERE sync_status = 'conflict' OR retry_count >= ${PHOTO_MAX_RETRIES}`
+  );
+  await database.runAsync(
+    `DELETE FROM pending_photos WHERE sync_status = 'conflict' OR retry_count >= ?`,
+    PHOTO_MAX_RETRIES
+  );
+  return before?.n ?? 0;
+}
+
 export async function savePhotoLocally(params: {
   localUri: string;
   projectId: string;
@@ -342,6 +432,46 @@ export async function recordPhotoRetryFailure(localId: string, errorMessage: str
     `UPDATE pending_photos SET retry_count = retry_count + 1, last_error = ? WHERE id = ?`,
     errorMessage.slice(0, 500), localId
   );
+}
+
+export async function markPhotoConflict(localId: string, errorMessage: string): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE pending_photos SET sync_status = 'conflict', last_error = ? WHERE id = ?`,
+    errorMessage.slice(0, 500), localId
+  );
+}
+
+/**
+ * Move photos that can never sync into 'conflict' state so they stop
+ * inflating getPendingCount. Called at the top of each sync pass.
+ * Criteria:
+ *   - retry_count >= PHOTO_MAX_RETRIES (transient upload failures exhausted)
+ *   - survey_id IS NULL AND the linked local survey is itself 'synced' or
+ *     'conflict' — i.e. the parent will never produce a remote id, so the
+ *     photo is orphaned forever.
+ */
+export async function sweepStuckPhotos(): Promise<number> {
+  const database = await getDatabase();
+  const result1 = await database.runAsync(
+    `UPDATE pending_photos
+       SET sync_status = 'conflict',
+           last_error = COALESCE(last_error, 'retry limit reached')
+     WHERE sync_status = 'pending' AND retry_count >= ?`,
+    PHOTO_MAX_RETRIES
+  );
+  const result2 = await database.runAsync(
+    `UPDATE pending_photos
+       SET sync_status = 'conflict',
+           last_error = COALESCE(last_error, 'parent survey no longer syncable')
+     WHERE sync_status = 'pending'
+       AND survey_id IS NULL
+       AND survey_local_id IS NOT NULL
+       AND survey_local_id NOT IN (
+         SELECT id FROM pending_surveys WHERE sync_status = 'pending'
+       )`
+  );
+  return (result1.changes ?? 0) + (result2.changes ?? 0);
 }
 
 export async function cacheTemplate(params: {
@@ -497,7 +627,7 @@ export async function getCachedTargetNotes(projectId: string): Promise<Array<{
 }
 
 export async function getCachedTargetNote(noteId: string): Promise<{
-  id: string; category: string | null; title: string; description: string | null;
+  id: string; project_id: string; category: string | null; title: string; description: string | null;
   priority: string | null; is_verified: number; location_text: string | null; photos: string | null;
 } | null> {
   const database = await getDatabase();

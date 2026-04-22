@@ -13,7 +13,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import SurveyTypePicker from "@/components/survey-type-picker";
-import { cacheSurvey, getCachedSurveys } from "@/lib/database";
+import { cacheSurvey, getCachedSurveys, getCachedProjectSites } from "@/lib/database";
 import type { Survey } from "@/types/survey";
 import type { SurveyTemplate } from "@/types/survey-template";
 import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
@@ -27,6 +27,7 @@ export default function SurveysListScreen() {
   const { id, siteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
   const router = useRouter();
   const [surveys, setSurveys] = useState<Survey[]>([]);
+  const [sitesMap, setSitesMap] = useState<Map<string, string>>(new Map());
   const [filter, setFilter] = useState<"active" | "completed">("active");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -73,6 +74,16 @@ export default function SurveysListScreen() {
     fetchSurveys().finally(() => setLoading(false));
   }, [fetchSurveys]);
 
+  useEffect(() => {
+    if (!id || siteId) return;
+    (async () => {
+      const sites = await getCachedProjectSites(id);
+      const map = new Map<string, string>();
+      for (const s of sites) map.set(s.id, s.site_code);
+      setSitesMap(map);
+    })();
+  }, [id, siteId]);
+
   const onRefresh = async () => {
     setRefreshing(true);
     await fetchSurveys();
@@ -88,6 +99,7 @@ export default function SurveysListScreen() {
 
   const renderSurvey = ({ item }: { item: Survey }) => {
     const sc = statusColors[item.status] ?? colors.text.muted;
+    const siteLabel = !siteId && item.site_id ? sitesMap.get(item.site_id) : null;
     return (
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => {
         if (item.survey_type === "releve_survey") {
@@ -104,6 +116,12 @@ export default function SurveysListScreen() {
               <View style={[styles.tag, { backgroundColor: sc + "1A" }]}>
                 <Text style={[styles.tagText, { color: sc }]}>{surveyStatusLabels[item.status] ?? item.status}</Text>
               </View>
+              {siteLabel && (
+                <View style={styles.siteBadge}>
+                  <Ionicons name="location" size={12} color={colors.primary.DEFAULT} />
+                  <Text style={styles.siteBadgeText}>{siteLabel}</Text>
+                </View>
+              )}
               {item.notes && <Ionicons name="document-text-outline" size={16} color={colors.text.muted} />}
             </View>
           </View>
@@ -208,6 +226,16 @@ const styles = StyleSheet.create({
   cardTags: { flexDirection: "row", alignItems: "center", gap: 10 },
   tag: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
   tagText: { fontSize: 13, fontWeight: "600" },
+  siteBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: colors.primary.DEFAULT + "12",
+  },
+  siteBadgeText: { fontSize: 12, fontWeight: "600", color: colors.primary.dark },
   empty: { alignItems: "center", paddingTop: 60, gap: 12 },
   emptyText: { fontSize: 17, color: colors.text.body },
 });

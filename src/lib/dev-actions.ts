@@ -2,6 +2,8 @@ import { supabase } from "@/lib/supabase";
 import {
   getCachedTemplate, getCachedProjects, cacheTemplate,
   cacheHabitat, cacheTargetNote,
+  getAllPendingSurveys, getAllPendingPhotos,
+  dropConflictedSurveys, dropConflictedPhotos,
 } from "@/lib/database";
 import { saveSurvey } from "@/lib/survey-save";
 import { getReleveDefaults } from "@/lib/releve-save";
@@ -155,4 +157,55 @@ export async function createTestTargetNote(projectId: string): Promise<ProjectDa
     locationText: `POINT(${lng} ${lat})`, photos: [], siteId: null,
   });
   return { ok: true };
+}
+
+/**
+ * Build a single multi-line diagnostic string from the pending queue.
+ * Includes sync_status, retry count, and the last error for each row so
+ * the user can see WHY something is stuck (typical case: RLS violation
+ * because the project belongs to a different organization).
+ */
+export async function inspectPending(): Promise<string> {
+  const [surveys, photos] = await Promise.all([getAllPendingSurveys(), getAllPendingPhotos()]);
+
+  const bucket = (rows: { sync_status: string }[]): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const r of rows) out[r.sync_status] = (out[r.sync_status] ?? 0) + 1;
+    return out;
+  };
+
+  const surveysByStatus = bucket(surveys);
+  const photosByStatus = bucket(photos);
+
+  const lines: string[] = [];
+  lines.push(`Surveys: ${surveys.length} (pending: ${surveysByStatus.pending ?? 0}, conflict: ${surveysByStatus.conflict ?? 0})`);
+  lines.push(`Photos: ${photos.length} (pending: ${photosByStatus.pending ?? 0}, conflict: ${photosByStatus.conflict ?? 0})`);
+
+  if (surveys.length > 0) {
+    lines.push("", "— SURVEYS —");
+    for (const s of surveys.slice(0, 6)) {
+      lines.push(`• ${s.sync_status.toUpperCase()} ${s.survey_type} (retry ${s.retry_count ?? 0})`);
+      if (s.last_error) lines.push(`  ↳ ${s.last_error}`);
+    }
+    if (surveys.length > 6) lines.push(`  … and ${surveys.length - 6} more`);
+  }
+  if (photos.length > 0) {
+    lines.push("", "— PHOTOS —");
+    for (const p of photos.slice(0, 6)) {
+      lines.push(`• ${p.sync_status.toUpperCase()} survey=${p.survey_id ? "remote" : "local"} (retry ${p.retry_count ?? 0})`);
+      if (p.last_error) lines.push(`  ↳ ${p.last_error}`);
+    }
+    if (photos.length > 6) lines.push(`  … and ${photos.length - 6} more`);
+  }
+
+  if (surveys.length === 0 && photos.length === 0) lines.push("", "Queue is empty.");
+  return lines.join("\n");
+}
+
+export async function dropAllConflicts(): Promise<{ surveys: number; photos: number }> {
+  const [surveys, photos] = await Promise.all([
+    dropConflictedSurveys(),
+    dropConflictedPhotos(),
+  ]);
+  return { surveys, photos };
 }
