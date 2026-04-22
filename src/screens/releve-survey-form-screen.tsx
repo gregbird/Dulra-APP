@@ -29,6 +29,7 @@ import type { FormData } from "@/types/survey-template";
 import type { ReleveSpeciesEntry } from "@/types/releve";
 import { useDevEventStore } from "@/lib/dev-events";
 import { generateTestReleveFormData } from "@/lib/dev-fill-data";
+import { useNetworkStore } from "@/lib/network";
 
 /* ── Main screen ────────────────────────────────────────────── */
 
@@ -120,22 +121,25 @@ export default function ReleveSurveyFormScreen() {
 
   const init = useCallback(async () => {
     try {
-      // Resolve current user for surveyor attribution default
+      const online = useNetworkStore.getState().isOnline;
+      // Session from SecureStore — safe offline.
       try {
         const { supabase } = await import("@/lib/supabase");
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user?.id) {
           setCurrentUserId(session.user.id);
-          try {
-            const { data: profile } = await supabase
-              .from("profiles")
-              .select("full_name")
-              .eq("id", session.user.id)
-              .single();
-            if (profile?.full_name) setCurrentUserName(profile.full_name);
-          } catch { /* offline */ }
+          if (online) {
+            try {
+              const { data: profile } = await supabase
+                .from("profiles")
+                .select("full_name")
+                .eq("id", session.user.id)
+                .single();
+              if (profile?.full_name) setCurrentUserName(profile.full_name);
+            } catch { /* fall through */ }
+          }
         }
-      } catch { /* offline */ }
+      } catch { /* session read failure — keep going */ }
 
       // For existing surveys, check pending (unsynced) edits first — no network needed
       if (!isNew && surveyId) {
@@ -148,6 +152,13 @@ export default function ReleveSurveyFormScreen() {
           restoreFromJson(pending.form_data);
           return;
         }
+      }
+
+      // Offline: skip the 3-4 Supabase round-trips that each block on the
+      // 10s fetch timeout, go straight to the cache fallback.
+      if (!online) {
+        await loadFromCache();
+        return;
       }
 
       const { supabase } = await import("@/lib/supabase");

@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedTargetNotes } from "@/lib/database";
 import { cacheAllData } from "@/lib/cache-refresh";
+import { useNetworkStore } from "@/lib/network";
 import TargetNotesList from "@/components/target-notes-list";
 import type { TargetNote } from "@/types/habitat";
 
@@ -16,6 +17,15 @@ export default function TargetNotesScreen() {
 
   const fetchNotes = useCallback(async () => {
     if (!id) return;
+    const readCache = async () => {
+      let cached = await getCachedTargetNotes(id);
+      if (siteId) cached = cached.filter((n) => n.site_id === siteId || n.site_id === null);
+      setNotes(cached as TargetNote[]);
+    };
+    if (!useNetworkStore.getState().isOnline) {
+      await readCache();
+      return;
+    }
     try {
       let query = supabase
         .from("target_notes")
@@ -27,9 +37,7 @@ export default function TargetNotesScreen() {
       if (error) throw error;
       if (data) setNotes(data as TargetNote[]);
     } catch {
-      let cached = await getCachedTargetNotes(id);
-      if (siteId) cached = cached.filter((n) => n.site_id === siteId || n.site_id === null);
-      if (cached.length > 0) setNotes(cached as TargetNote[]);
+      await readCache();
     }
   }, [id, siteId]);
 

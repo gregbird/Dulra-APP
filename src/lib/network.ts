@@ -37,12 +37,23 @@ export async function startNetworkListener(onOnline: () => void) {
   if (netUnsubscribe) return;
   syncCallback = onOnline;
 
+  // `isConnected` only checks the interface (wifi/cellular up), not actual
+  // internet. On a captive-portal or dead-router wifi it returns true even
+  // though real fetches time out after 10-60s. `isInternetReachable` is
+  // Apple's active probe (pings a test URL); when non-null it's the truth.
+  // If null (briefly at startup), fall back to `isConnected`.
+  const resolveOnline = (s: { isConnected: boolean | null; isInternetReachable: boolean | null }): boolean => {
+    if (s.isInternetReachable === true) return true;
+    if (s.isInternetReachable === false) return false;
+    return s.isConnected === true;
+  };
+
   const initial = await NetInfo.fetch();
-  useNetworkStore.getState().setOnline(initial.isConnected === true);
+  useNetworkStore.getState().setOnline(resolveOnline(initial));
 
   netUnsubscribe = NetInfo.addEventListener((state) => {
     if (useNetworkStore.getState().devForcedOffline) return;
-    const online = state.isConnected === true;
+    const online = resolveOnline(state);
     const prev = useNetworkStore.getState().isOnline;
     useNetworkStore.getState().setOnline(online);
     if (online && !prev && syncCallback) syncCallback();
@@ -52,7 +63,7 @@ export async function startNetworkListener(onOnline: () => void) {
     if (state === "active") {
       if (useNetworkStore.getState().devForcedOffline) return;
       const netState = await NetInfo.fetch();
-      const online = netState.isConnected === true;
+      const online = resolveOnline(netState);
       useNetworkStore.getState().setOnline(online);
       if (online && syncCallback) syncCallback();
     }

@@ -14,6 +14,7 @@ import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import SurveyTypePicker from "@/components/survey-type-picker";
 import { cacheSurvey, getCachedSurveys, getCachedProjectSites } from "@/lib/database";
+import { useNetworkStore } from "@/lib/network";
 import type { Survey } from "@/types/survey";
 import type { SurveyTemplate } from "@/types/survey-template";
 import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
@@ -33,8 +34,27 @@ export default function SurveysListScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
 
+  const loadSurveysFromCache = useCallback(async () => {
+    if (!id) return;
+    let cached = await getCachedSurveys(id);
+    if (siteId) cached = cached.filter((c) => c.site_id === siteId);
+    if (cached.length > 0) {
+      setSurveys(cached.map((c) => ({
+        ...c, surveyor_id: null, start_time: null, end_time: null,
+        sync_status: "synced" as const, created_at: "", updated_at: "",
+        status: c.status as Survey["status"],
+      })));
+    } else {
+      setSurveys([]);
+    }
+  }, [id, siteId]);
+
   const fetchSurveys = useCallback(async () => {
     if (!id) return;
+    if (!useNetworkStore.getState().isOnline) {
+      await loadSurveysFromCache();
+      return;
+    }
     try {
       let query = supabase
         .from("surveys")
@@ -58,17 +78,9 @@ export default function SurveysListScreen() {
         }
       }
     } catch {
-      let cached = await getCachedSurveys(id);
-      if (siteId) cached = cached.filter((c) => c.site_id === siteId);
-      if (cached.length > 0) {
-        setSurveys(cached.map((c) => ({
-          ...c, surveyor_id: null, start_time: null, end_time: null,
-          sync_status: "synced" as const, created_at: "", updated_at: "",
-          status: c.status as Survey["status"],
-        })));
-      }
+      await loadSurveysFromCache();
     }
-  }, [id, siteId]);
+  }, [id, siteId, loadSurveysFromCache]);
 
   useEffect(() => {
     fetchSurveys().finally(() => setLoading(false));

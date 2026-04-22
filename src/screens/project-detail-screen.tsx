@@ -14,6 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedSurveys, getCachedProjects, getCachedHabitats, getCachedTargetNotes, getCachedProjectSites } from "@/lib/database";
+import { useNetworkStore } from "@/lib/network";
 import SurveyTypePicker from "@/components/survey-type-picker";
 import SitePicker from "@/components/site-picker";
 import type { Project, ProjectSite } from "@/types/project";
@@ -48,8 +49,37 @@ export default function ProjectDetailScreen() {
     return selectedSiteId;
   }, [sites, selectedSiteId]);
 
+  const loadFromCacheOnly = useCallback(async () => {
+    if (!id) return;
+    const [cachedSurveys, cachedHabitats, cachedNotes, cachedSites] = await Promise.all([
+      getCachedSurveys(id), getCachedHabitats(id), getCachedTargetNotes(id), getCachedProjectSites(id),
+    ]);
+    setSites(cachedSites as ProjectSite[]);
+    const filteredSurveys = effectiveSiteId ? cachedSurveys.filter((s) => s.site_id === effectiveSiteId) : cachedSurveys;
+    const filteredHabitats = effectiveSiteId ? cachedHabitats.filter((h) => h.site_id === effectiveSiteId || h.site_id === null) : cachedHabitats;
+    const filteredNotes = effectiveSiteId ? cachedNotes.filter((n) => n.site_id === effectiveSiteId || n.site_id === null) : cachedNotes;
+    setCounts({ surveys: filteredSurveys.length, habitats: filteredHabitats.length, targetNotes: filteredNotes.length });
+    const allProjects = await getCachedProjects();
+    const cached = allProjects.find((p) => p.id === id);
+    if (cached) {
+      setProject({
+        id: cached.id, name: cached.name, site_code: cached.site_code,
+        status: (cached.status ?? "active") as Project["status"],
+        health_status: (cached.health_status ?? "on_track") as Project["health_status"],
+        county: cached.county, updated_at: cached.updated_at ?? "",
+      });
+    }
+  }, [id, effectiveSiteId]);
+
   const fetchData = useCallback(async () => {
     if (!id) return;
+    // Offline fast-path: five parallel Supabase queries each hitting the 10s
+    // timeout would stall the screen for 10s before falling back to cache.
+    // Skip the attempt entirely when we know we're offline.
+    if (!useNetworkStore.getState().isOnline) {
+      await loadFromCacheOnly();
+      return;
+    }
     try {
       let surveyCountQuery = supabase.from("surveys").select("id", { count: "exact", head: true }).eq("project_id", id);
       let habitatCountQuery = supabase.from("habitat_polygons").select("id", { count: "exact", head: true }).eq("project_id", id);
@@ -85,27 +115,9 @@ export default function ProjectDetailScreen() {
         targetNotes: notesRes.count ?? 0,
       });
     } catch {
-      if (!id) return;
-      const [cachedSurveys, cachedHabitats, cachedNotes, cachedSites] = await Promise.all([
-        getCachedSurveys(id), getCachedHabitats(id), getCachedTargetNotes(id), getCachedProjectSites(id),
-      ]);
-      setSites(cachedSites as ProjectSite[]);
-      const filteredSurveys = effectiveSiteId ? cachedSurveys.filter((s) => s.site_id === effectiveSiteId) : cachedSurveys;
-      const filteredHabitats = effectiveSiteId ? cachedHabitats.filter((h) => h.site_id === effectiveSiteId || h.site_id === null) : cachedHabitats;
-      const filteredNotes = effectiveSiteId ? cachedNotes.filter((n) => n.site_id === effectiveSiteId || n.site_id === null) : cachedNotes;
-      setCounts({ surveys: filteredSurveys.length, habitats: filteredHabitats.length, targetNotes: filteredNotes.length });
-      const allProjects = await getCachedProjects();
-      const cached = allProjects.find((p) => p.id === id);
-      if (cached) {
-        setProject({
-          id: cached.id, name: cached.name, site_code: cached.site_code,
-          status: (cached.status ?? "active") as Project["status"],
-          health_status: (cached.health_status ?? "on_track") as Project["health_status"],
-          county: cached.county, updated_at: cached.updated_at ?? "",
-        });
-      }
+      await loadFromCacheOnly();
     }
-  }, [id, effectiveSiteId]);
+  }, [id, effectiveSiteId, loadFromCacheOnly]);
 
   useEffect(() => {
     fetchData().finally(() => setLoading(false));

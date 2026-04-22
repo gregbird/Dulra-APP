@@ -19,12 +19,13 @@ import DynamicField from "@/components/dynamic-field";
 import SurveyPhotos from "@/components/survey-photos";
 import type { SurveyPhotosHandle } from "@/components/survey-photos";
 import SurveyorPicker from "@/components/surveyor-picker";
-import { getCachedTemplate, cacheTemplate, getCachedSurvey } from "@/lib/database";
+import { getCachedTemplate, cacheTemplate, getCachedSurvey, getCachedProjects } from "@/lib/database";
 import { saveSurvey } from "@/lib/survey-save";
 import type { SurveyTemplate, TemplateSection, TemplateField, FormData } from "@/types/survey-template";
 import { surveyTypeLabels } from "@/types/survey";
 import { useDevEventStore } from "@/lib/dev-events";
 import { generateTestFormData } from "@/lib/dev-fill-data";
+import { useNetworkStore } from "@/lib/network";
 
 function SectionFields({
   fields,
@@ -85,6 +86,17 @@ export default function SurveyFormScreen() {
   const photosRef = useRef<SurveyPhotosHandle>(null);
 
   const loadTemplate = useCallback(async (type: string) => {
+    const readCache = async (): Promise<SurveyTemplate | null> => {
+      const cached = await getCachedTemplate(type);
+      if (!cached) return null;
+      const parsed = JSON.parse(cached.default_fields);
+      const tmpl = { id: cached.survey_type, name: cached.name, survey_type: cached.survey_type, is_active: true, default_fields: parsed } as SurveyTemplate;
+      setTemplate(tmpl);
+      const sections = parsed?.sections ?? [];
+      setExpandedSections(new Set(sections.map((s: TemplateSection) => s.id)));
+      return tmpl;
+    };
+    if (!useNetworkStore.getState().isOnline) return readCache();
     try {
       const { data: tmpl, error: tmplError } = await supabase
         .from("survey_templates")
@@ -100,21 +112,43 @@ export default function SurveyFormScreen() {
       }
       return tmpl;
     } catch {
-      const cached = await getCachedTemplate(type);
-      if (cached) {
-        const parsed = JSON.parse(cached.default_fields);
-        const tmpl = { id: cached.survey_type, name: cached.name, survey_type: cached.survey_type, is_active: true, default_fields: parsed } as SurveyTemplate;
-        setTemplate(tmpl);
-        const sections = parsed?.sections ?? [];
-        setExpandedSections(new Set(sections.map((s: TemplateSection) => s.id)));
-        return tmpl;
-      }
-      return null;
+      return readCache();
     }
   }, []);
 
+  const restoreFromCached = useCallback(async (): Promise<boolean> => {
+    if (!surveyId) return false;
+    const cached = await getCachedSurvey(surveyId);
+    if (!cached) return false;
+    if (cached.survey_type === "releve_survey") {
+      router.replace(`/releve-survey/${surveyId}?projectId=${cached.project_id}`);
+      return true;
+    }
+    setSurveyType(cached.survey_type);
+    setProjectId(cached.project_id);
+    const cachedProjects = await getCachedProjects();
+    const proj = cachedProjects.find((p) => p.id === cached.project_id);
+    if (proj) setProjectName(proj.name);
+    await loadTemplate(cached.survey_type);
+    const existing: FormData = {};
+    if (cached.weather) {
+      const w = JSON.parse(cached.weather);
+      const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
+      existing["weather"] = weatherFields;
+    }
+    if (cached.form_data) {
+      Object.assign(existing, JSON.parse(cached.form_data));
+    }
+    setFormData(existing);
+    return true;
+  }, [surveyId, loadTemplate, router]);
+
   const fetchExistingSurvey = useCallback(async () => {
     if (!surveyId) return;
+    if (!useNetworkStore.getState().isOnline) {
+      await restoreFromCached();
+      return;
+    }
     try {
       const { data: survey, error: surveyError } = await supabase
         .from("surveys")
@@ -152,56 +186,48 @@ export default function SurveyFormScreen() {
       }
       setFormData(existing);
     } catch {
-      if (!surveyId) return;
-      const cached = await getCachedSurvey(surveyId);
-      if (cached) {
-        if (cached.survey_type === "releve_survey") {
-          router.replace(`/releve-survey/${surveyId}?projectId=${cached.project_id}`);
-          return;
-        }
-        setSurveyType(cached.survey_type);
-        setProjectId(cached.project_id);
-        await loadTemplate(cached.survey_type);
-        const existing: FormData = {};
-        if (cached.weather) {
-          const w = JSON.parse(cached.weather);
-          const weatherFields = (w.templateFields ?? w) as Record<string, string | number | null>;
-          existing["weather"] = weatherFields;
-        }
-        if (cached.form_data) {
-          Object.assign(existing, JSON.parse(cached.form_data));
-        }
-        setFormData(existing);
-      }
+      await restoreFromCached();
     }
-  }, [surveyId, loadTemplate]);
+  }, [surveyId, loadTemplate, restoreFromCached, router]);
 
   useEffect(() => {
     const init = async () => {
       try {
-        // Resolve current user for surveyor attribution default
+        const online = useNetworkStore.getState().isOnline;
+        // Session from SecureStore — never hits the network.
         const { data: { session } } = await supabase.auth.getSession();
         if (session?.user?.id) {
           setCurrentUserId(session.user.id);
-          try {
-            const { data: profile } = await supabase
-              .from("profiles")
-              .select("full_name")
-              .eq("id", session.user.id)
-              .single();
-            if (profile?.full_name) setCurrentUserName(profile.full_name);
-          } catch { /* offline — currentUserName stays null, picker shows "Me" */ }
+          if (online) {
+            try {
+              const { data: profile } = await supabase
+                .from("profiles")
+                .select("full_name")
+                .eq("id", session.user.id)
+                .single();
+              if (profile?.full_name) setCurrentUserName(profile.full_name);
+            } catch { /* fall through — picker shows "Me" */ }
+          }
         }
 
         if (isNew && surveyType) {
           await loadTemplate(surveyType);
           if (params.projectId) {
-            const { data: proj } = await supabase
-              .from("projects")
-              .select("name")
-              .eq("id", params.projectId)
-              .single();
-            if (proj) setProjectName(proj.name);
+            if (online) {
+              try {
+                const { data: proj } = await supabase
+                  .from("projects")
+                  .select("name")
+                  .eq("id", params.projectId)
+                  .single();
+                if (proj) setProjectName(proj.name);
+              } catch { /* fall through to cache */ }
+            }
+            if (!projectName) {
+              const cachedProjects = await getCachedProjects();
+              const proj = cachedProjects.find((p) => p.id === params.projectId);
+              if (proj) setProjectName(proj.name);
+            }
           }
         } else if (surveyId) {
           await fetchExistingSurvey();

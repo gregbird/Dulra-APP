@@ -5,6 +5,7 @@ import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedHabitats } from "@/lib/database";
 import { cacheAllData } from "@/lib/cache-refresh";
+import { useNetworkStore } from "@/lib/network";
 import HabitatList from "@/components/habitat-list";
 import type { HabitatPolygon } from "@/types/habitat";
 
@@ -16,6 +17,15 @@ export default function HabitatsScreen() {
 
   const fetchHabitats = useCallback(async () => {
     if (!id) return;
+    const readCache = async () => {
+      let cached = await getCachedHabitats(id);
+      if (siteId) cached = cached.filter((h) => h.site_id === siteId || h.site_id === null);
+      setHabitats(cached as HabitatPolygon[]);
+    };
+    if (!useNetworkStore.getState().isOnline) {
+      await readCache();
+      return;
+    }
     try {
       let query = supabase
         .from("habitat_polygons")
@@ -27,9 +37,7 @@ export default function HabitatsScreen() {
       if (error) throw error;
       if (data) setHabitats(data as HabitatPolygon[]);
     } catch {
-      let cached = await getCachedHabitats(id);
-      if (siteId) cached = cached.filter((h) => h.site_id === siteId || h.site_id === null);
-      if (cached.length > 0) setHabitats(cached as HabitatPolygon[]);
+      await readCache();
     }
   }, [id, siteId]);
 
