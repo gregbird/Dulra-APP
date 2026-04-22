@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   ScrollView,
+  KeyboardAvoidingView,
 } from "react-native";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
@@ -39,14 +40,16 @@ export default function LoginScreen() {
   };
 
   return (
-    <ScrollView
+    <KeyboardAvoidingView
       style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+    <ScrollView
       contentContainerStyle={styles.scrollContent}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="none"
       showsVerticalScrollIndicator={false}
       bounces={false}
-      automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
     >
       <Image
         source={require("../../assets/dulra-logo.jpg")}
@@ -65,9 +68,12 @@ export default function LoginScreen() {
           value={email}
           onChangeText={setEmail}
           autoCapitalize="none"
+          autoCorrect={false}
           keyboardType="email-address"
-          textContentType="emailAddress"
-          autoComplete="email"
+          textContentType="none"
+          autoComplete="off"
+          importantForAutofill="no"
+          spellCheck={false}
           returnKeyType="next"
           onSubmitEditing={() => passwordRef.current?.focus()}
           blurOnSubmit={false}
@@ -82,8 +88,12 @@ export default function LoginScreen() {
           value={password}
           onChangeText={setPassword}
           secureTextEntry
-          textContentType="password"
-          autoComplete="password"
+          autoCapitalize="none"
+          autoCorrect={false}
+          textContentType="none"
+          autoComplete="off"
+          importantForAutofill="no"
+          spellCheck={false}
           returnKeyType="done"
           onSubmitEditing={handleLogin}
         />
@@ -102,6 +112,7 @@ export default function LoginScreen() {
         </TouchableOpacity>
       </View>
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -112,10 +123,10 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    justifyContent: "center",
     alignItems: "center",
     paddingHorizontal: 32,
-    paddingTop: 120,
-    paddingBottom: 32,
+    paddingVertical: 32,
   },
   logo: {
     width: 200,

@@ -5,16 +5,16 @@
     "version": "1.0.0",
     "scheme": "dulra",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/dulra_logo.png",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/dulra_logo.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.dulra.app",
+      "bundleIdentifier": "com.dulra.dulradev",
       "infoPlist": {
         "NSCameraUsageDescription": "Take photos of species, habitats, and survey sites to include in your field records.",
         "NSLocationWhenInUseUsageDescription": "Your location is recorded with each observation so survey data can be mapped accurately.",
@@ -23,16 +23,15 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "backgroundColor": "#FFFFFF",
+        "foregroundImage": "./assets/dulra_logo.png",
+        "monochromeImage": "./assets/dulra_logo.png"
       },
-      "package": "com.dulra.app",
+      "package": "com.dulra.dulradev",
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/dulra_logo.png"
     },
     "plugins": [
       "expo-router",
