@@ -11,6 +11,8 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { getCachedProfiles } from "@/lib/database";
+import { useNetworkStore } from "@/lib/network";
 import type { Profile } from "@/types/project";
 
 const roleLabels: Record<string, { label: string; color: string }> = {
@@ -29,20 +31,43 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     const fetchProfile = async () => {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-
-        const { data } = await supabase
-          .from("profiles")
-          .select("id, email, full_name, role, organization_id")
-          .eq("id", user.id)
-          .single();
-
-        if (data) setProfile(data as Profile);
-      } catch {
-        /* offline */
+      // Session is in SecureStore, no network needed — gives us the logged-in
+      // user.id and email even when offline.
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
+      if (!user) {
+        setLoading(false);
+        return;
       }
+
+      const isOnline = useNetworkStore.getState().isOnline;
+
+      if (isOnline) {
+        try {
+          const { data } = await supabase
+            .from("profiles")
+            .select("id, email, full_name, role, organization_id")
+            .eq("id", user.id)
+            .single();
+          if (data) {
+            setProfile(data as Profile);
+            setLoading(false);
+            return;
+          }
+        } catch { /* fall through to cache */ }
+      }
+
+      // Offline or remote fetch failed — pull whatever we cached at the last
+      // online session so the user still sees their name/role/email.
+      const cached = await getCachedProfiles();
+      const mine = cached.find((p) => p.id === user.id);
+      setProfile({
+        id: user.id,
+        email: user.email ?? "",
+        full_name: mine?.full_name ?? "",
+        role: mine?.role ?? "ecologist",
+        organization_id: "",
+      } as Profile);
       setLoading(false);
     };
 

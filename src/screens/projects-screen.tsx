@@ -17,7 +17,22 @@ import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { cacheProject, getCachedProjects } from "@/lib/database";
 import { cacheAllData } from "@/lib/cache-refresh";
+import { useNetworkStore } from "@/lib/network";
 import type { Project } from "@/types/project";
+
+function mapCachedProjects(
+  cached: Awaited<ReturnType<typeof getCachedProjects>>,
+): Project[] {
+  return cached.map((c) => ({
+    id: c.id,
+    name: c.name,
+    site_code: c.site_code,
+    status: (c.status ?? "active") as Project["status"],
+    health_status: (c.health_status ?? "on_track") as Project["health_status"],
+    county: c.county,
+    updated_at: c.updated_at ?? "",
+  }));
+}
 
 const statusLabels: Record<string, string> = {
   draft: "Draft",
@@ -50,71 +65,91 @@ export default function ProjectsScreen() {
   }, [projects, search]);
 
   const fetchProjects = useCallback(async () => {
+    // Offline fast-path: skip Supabase entirely. supabase.auth.getUser() makes
+    // a network call to validate the token — if we're offline, that returns
+    // a synthetic 503 and the function below used to bail before reaching the
+    // cache fallback, leaving the screen blank.
+    if (!useNetworkStore.getState().isOnline) {
+      const cached = await getCachedProjects();
+      setProjects(mapCachedProjects(cached));
+      return;
+    }
+
     try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
-
-    const isAdminOrPM =
-      profile?.role === "admin" || profile?.role === "project_manager";
-
-    let query = supabase
-      .from("projects")
-      .select("id, name, site_code, status, health_status, county, updated_at")
-      .order("updated_at", { ascending: false });
-
-    if (!isAdminOrPM) {
-      const [{ data: memberships }, { data: createdProjects }] = await Promise.all([
-        supabase
-          .from("project_members")
-          .select("project_id")
-          .eq("user_id", user.id),
-        supabase
-          .from("projects")
-          .select("id")
-          .eq("created_by", user.id),
-      ]);
-
-      const memberIds = memberships?.map((m) => m.project_id) ?? [];
-      const createdIds = createdProjects?.map((p) => p.id) ?? [];
-      const projectIds = [...new Set([...memberIds, ...createdIds])];
-
-      if (projectIds.length === 0) {
-        setProjects([]);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        // Token validation came back empty even though we thought we were
+        // online (stale NetInfo, captive portal). Fall back to cache so the
+        // screen renders instead of staying empty.
+        const cached = await getCachedProjects();
+        setProjects(mapCachedProjects(cached));
         return;
       }
 
-      query = query.in("id", projectIds);
-    }
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .single();
 
-    const { data, error } = await query;
-    if (error) throw error;
+      const isAdminOrPM =
+        profile?.role === "admin" || profile?.role === "project_manager";
 
-    if (data) {
-      setProjects(data);
-      for (const p of data) {
-        await cacheProject({ id: p.id, name: p.name, siteCode: p.site_code, status: p.status, healthStatus: p.health_status, county: p.county, updatedAt: p.updated_at });
+      let query = supabase
+        .from("projects")
+        .select("id, name, site_code, status, health_status, county, updated_at")
+        .order("updated_at", { ascending: false });
+
+      if (!isAdminOrPM) {
+        const [{ data: memberships }, { data: createdProjects }] = await Promise.all([
+          supabase
+            .from("project_members")
+            .select("project_id")
+            .eq("user_id", user.id),
+          supabase
+            .from("projects")
+            .select("id")
+            .eq("created_by", user.id),
+        ]);
+
+        const memberIds = memberships?.map((m) => m.project_id) ?? [];
+        const createdIds = createdProjects?.map((p) => p.id) ?? [];
+        const projectIds = [...new Set([...memberIds, ...createdIds])];
+
+        if (projectIds.length === 0) {
+          setProjects([]);
+          return;
+        }
+
+        query = query.in("id", projectIds);
       }
-    }
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      if (data) {
+        setProjects(data);
+        for (const p of data) {
+          await cacheProject({ id: p.id, name: p.name, siteCode: p.site_code, status: p.status, healthStatus: p.health_status, county: p.county, updatedAt: p.updated_at });
+        }
+      }
     } catch {
       const cached = await getCachedProjects();
-      if (cached.length > 0) {
-        setProjects(cached.map((c) => ({
-          id: c.id, name: c.name, site_code: c.site_code, status: (c.status ?? "active") as Project["status"],
-          health_status: (c.health_status ?? "on_track") as Project["health_status"], county: c.county, updated_at: c.updated_at ?? "",
-        })));
-      }
+      if (cached.length > 0) setProjects(mapCachedProjects(cached));
     }
   }, []);
 
+  const isOnline = useNetworkStore((s) => s.isOnline);
+
   useEffect(() => {
     fetchProjects().finally(() => setLoading(false));
-  }, [fetchProjects]);
+    // Re-running on isOnline flips handles two cases:
+    //  1) Cold start with empty cache + online: the first render sees the
+    //     pessimistic default (false) and pulls an empty cache; as soon as
+    //     NetInfo resolves we re-fetch from Supabase.
+    //  2) Offline → online transition mid-session: refresh instead of
+    //     sitting on stale cached data.
+  }, [fetchProjects, isOnline]);
   const loadFromCache = useCallback(async () => {
     const cached = await getCachedProjects();
     setProjects(cached.map((c) => ({
