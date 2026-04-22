@@ -19,6 +19,8 @@ import { colors } from "@/constants/colors";
 import { uploadPhoto } from "@/lib/photo-service";
 import { useNetworkStore } from "@/lib/network";
 import CameraCapture from "@/components/camera-capture";
+import { useDevEventStore } from "@/lib/dev-events";
+import { createTestPhotoUri } from "@/lib/dev-fill-data";
 
 const thumbSize = (Dimensions.get("window").width - 32 - 24) / 3;
 
@@ -82,6 +84,19 @@ export default forwardRef<SurveyPhotosHandle, SurveyPhotosProps>(
       setLoading(true);
       refetchSaved(surveyId).finally(() => setLoading(false));
     }, [surveyId]);
+
+    const addPhotosToken = useDevEventStore((s) => s.addPhotosToken);
+    const clearAddPhotosToken = useDevEventStore((s) => s.clearAddPhotosToken);
+    useEffect(() => {
+      if (!__DEV__ || addPhotosToken == null) return;
+      (async () => {
+        for (let i = 0; i < 2; i++) {
+          const uri = await createTestPhotoUri();
+          addPhoto(uri);
+        }
+        clearAddPhotosToken();
+      })();
+    }, [addPhotosToken, clearAddPhotosToken]);
 
     const uploadImmediately = async (uri: string) => {
       if (!surveyId) return;

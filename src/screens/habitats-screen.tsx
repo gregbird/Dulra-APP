@@ -4,6 +4,7 @@ import { useLocalSearchParams, Stack } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedHabitats } from "@/lib/database";
+import { cacheAllData } from "@/lib/cache-refresh";
 import HabitatList from "@/components/habitat-list";
 import type { HabitatPolygon } from "@/types/habitat";
 
@@ -36,9 +37,21 @@ export default function HabitatsScreen() {
     fetchHabitats().finally(() => setLoading(false));
   }, [fetchHabitats]);
 
+  const loadFromCache = useCallback(async () => {
+    if (!id) return;
+    let cached = await getCachedHabitats(id);
+    if (siteId) cached = cached.filter((h) => h.site_id === siteId || h.site_id === null);
+    setHabitats(cached as HabitatPolygon[]);
+  }, [id, siteId]);
+
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchHabitats();
+    const ok = await cacheAllData();
+    if (ok) {
+      await loadFromCache();
+    } else {
+      await fetchHabitats();
+    }
     setRefreshing(false);
   };
 

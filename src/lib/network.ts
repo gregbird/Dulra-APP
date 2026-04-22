@@ -6,18 +6,22 @@ interface NetworkState {
   isOnline: boolean;
   pendingCount: number;
   syncing: boolean;
+  devForcedOffline: boolean;
   setOnline: (online: boolean) => void;
   setPendingCount: (count: number) => void;
   setSyncing: (syncing: boolean) => void;
+  setDevForcedOffline: (v: boolean) => void;
 }
 
 export const useNetworkStore = create<NetworkState>((set) => ({
   isOnline: true,
   pendingCount: 0,
   syncing: false,
+  devForcedOffline: false,
   setOnline: (online) => set({ isOnline: online }),
   setPendingCount: (count) => set({ pendingCount: count }),
   setSyncing: (syncing) => set({ syncing }),
+  setDevForcedOffline: (v) => set({ devForcedOffline: v }),
 }));
 
 let netUnsubscribe: (() => void) | null = null;
@@ -32,6 +36,7 @@ export async function startNetworkListener(onOnline: () => void) {
   useNetworkStore.getState().setOnline(initial.isConnected === true);
 
   netUnsubscribe = NetInfo.addEventListener((state) => {
+    if (useNetworkStore.getState().devForcedOffline) return;
     const online = state.isConnected === true;
     const prev = useNetworkStore.getState().isOnline;
     useNetworkStore.getState().setOnline(online);
@@ -40,6 +45,7 @@ export async function startNetworkListener(onOnline: () => void) {
 
   appStateSubscription = AppState.addEventListener("change", async (state: AppStateStatus) => {
     if (state === "active") {
+      if (useNetworkStore.getState().devForcedOffline) return;
       const netState = await NetInfo.fetch();
       const online = netState.isConnected === true;
       useNetworkStore.getState().setOnline(online);

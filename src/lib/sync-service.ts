@@ -5,31 +5,38 @@ import {
   getPendingPhotos,
   markSurveySynced,
   markPhotoSynced,
+  recordPhotoRetryFailure,
   getPendingCount,
   cacheSurvey,
 } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
 import { insertReleveSurvey, upsertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
 
-let syncing = false;
+// Promise-based lock: multiple triggers (SyncIndicator, network listener, AppState)
+// can race before `syncing = true` is committed. Holding the in-flight promise
+// and returning it guarantees a single concurrent sync pass.
+let syncPromise: Promise<void> | null = null;
 
 export async function syncPendingData(): Promise<void> {
-  if (syncing) return;
+  if (syncPromise) return syncPromise;
   const { isOnline } = useNetworkStore.getState();
   if (!isOnline) return;
 
-  syncing = true;
-  useNetworkStore.getState().setSyncing(true);
+  syncPromise = (async () => {
+    useNetworkStore.getState().setSyncing(true);
+    try {
+      await syncSurveys();
+      await syncPhotos();
+    } finally {
+      useNetworkStore.getState().setSyncing(false);
+      const count = await getPendingCount();
+      useNetworkStore.getState().setPendingCount(count);
+    }
+  })().finally(() => {
+    syncPromise = null;
+  });
 
-  try {
-    await syncSurveys();
-    await syncPhotos();
-  } finally {
-    syncing = false;
-    useNetworkStore.getState().setSyncing(false);
-    const count = await getPendingCount();
-    useNetworkStore.getState().setPendingCount(count);
-  }
+  return syncPromise;
 }
 
 async function syncSurveys(): Promise<void> {
@@ -57,9 +64,10 @@ async function syncSurveys(): Promise<void> {
         })
         .eq("id", survey.remote_id);
 
-      if (!error) {
-        // Also update releve_surveys/species for releve type
-        if (survey.survey_type === "releve_survey") {
+      if (error) continue;
+
+      if (survey.survey_type === "releve_survey") {
+        try {
           const releveFields = extractReleveFromFormData(formData as Record<string, unknown>);
           const releveId = await upsertReleveSurvey({
             projectId: survey.project_id,
@@ -67,29 +75,32 @@ async function syncSurveys(): Promise<void> {
             surveyDate: survey.survey_date,
             releveFields,
             userId: survey.surveyor_id || null,
+            siteId: survey.site_id,
           });
           if (releveId) {
             const species = extractSpeciesFromFormData(formData as Record<string, unknown>);
             await insertReleveSpecies(releveId, species);
           }
+        } catch {
+          // Leave pending for next sync retry
+          continue;
         }
-
-        // Update cache so offline reads get latest synced data
-        await cacheSurvey({
-          id: survey.remote_id,
-          projectId: survey.project_id,
-          surveyType: survey.survey_type,
-          surveyDate: survey.survey_date,
-          status: survey.status,
-          weather: { templateFields: allFields },
-          formData,
-          notes: null,
-          siteId: survey.site_id,
-        });
-
-        await markSurveySynced(survey.id);
-        await updatePhotoSurveyIds(survey.id, survey.remote_id);
       }
+
+      await cacheSurvey({
+        id: survey.remote_id,
+        projectId: survey.project_id,
+        surveyType: survey.survey_type,
+        surveyDate: survey.survey_date,
+        status: survey.status,
+        weather: { templateFields: allFields },
+        formData,
+        notes: null,
+        siteId: survey.site_id,
+      });
+
+      await markSurveySynced(survey.id);
+      await updatePhotoSurveyIds(survey.id, survey.remote_id);
     } else {
       let surveyorId = survey.surveyor_id;
       if (!surveyorId) {
@@ -99,55 +110,95 @@ async function syncSurveys(): Promise<void> {
         } catch { /* ignore */ }
       }
 
-      const { data, error } = await supabase
-        .from("surveys")
-        .insert({
-          project_id: survey.project_id,
-          survey_type: survey.survey_type,
-          surveyor_id: surveyorId || null,
-          survey_date: survey.survey_date,
-          status: survey.status,
-          sync_status: "synced",
-          local_id: survey.id,
-          weather: { templateFields: allFields },
-          form_data: formData,
-          site_id: survey.site_id ?? null,
-        })
-        .select("id")
-        .single();
+      // Idempotent sync: if a previous sync pass was interrupted after the
+      // surveys INSERT but before markSurveySynced, the remote row already
+      // exists with this local_id. Reuse it instead of creating a duplicate.
+      let remoteId: string | null = null;
+      try {
+        const { data: existing } = await supabase
+          .from("surveys")
+          .select("id")
+          .eq("local_id", survey.id)
+          .maybeSingle();
+        if (existing?.id) remoteId = existing.id;
+      } catch { /* fall through to INSERT */ }
 
-      if (!error && data) {
-        if (survey.survey_type === "releve_survey") {
+      if (!remoteId) {
+        const { data, error } = await supabase
+          .from("surveys")
+          .insert({
+            project_id: survey.project_id,
+            survey_type: survey.survey_type,
+            surveyor_id: surveyorId || null,
+            survey_date: survey.survey_date,
+            status: survey.status,
+            sync_status: "synced",
+            local_id: survey.id,
+            weather: { templateFields: allFields },
+            form_data: formData,
+            site_id: survey.site_id ?? null,
+          })
+          .select("id")
+          .single();
+
+        if (error || !data) continue;
+        remoteId = data.id as string;
+      } else {
+        // Existing remote row from a prior partial sync — refresh its contents
+        // so the latest local edits win.
+        await supabase
+          .from("surveys")
+          .update({
+            status: survey.status,
+            weather: { templateFields: allFields },
+            form_data: formData,
+            site_id: survey.site_id ?? null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", remoteId);
+      }
+
+      // Narrow for TS — both branches above either set remoteId or continue,
+      // so it is guaranteed non-null at this point.
+      if (!remoteId) continue;
+      const syncedId: string = remoteId;
+
+      if (survey.survey_type === "releve_survey") {
+        try {
           const releveFields = extractReleveFromFormData(formData as Record<string, unknown>);
-          const releveId = await insertReleveSurvey({
+          const releveId = await upsertReleveSurvey({
             projectId: survey.project_id,
-            surveyId: data.id,
+            surveyId: syncedId,
             surveyDate: survey.survey_date,
             releveFields,
             userId: surveyorId || null,
+            siteId: survey.site_id,
           });
           if (releveId) {
             const species = extractSpeciesFromFormData(formData as Record<string, unknown>);
             await insertReleveSpecies(releveId, species);
           }
+        } catch {
+          // Releve write failed — parent survey is fine; leave pending so next
+          // sync retries. markSurveySynced is skipped below.
+          continue;
         }
-
-        // Cache the newly synced survey for offline access
-        await cacheSurvey({
-          id: data.id,
-          projectId: survey.project_id,
-          surveyType: survey.survey_type,
-          surveyDate: survey.survey_date,
-          status: survey.status,
-          weather: { templateFields: allFields },
-          formData,
-          notes: null,
-          siteId: survey.site_id,
-        });
-
-        await markSurveySynced(survey.id);
-        await updatePhotoSurveyIds(survey.id, data.id);
       }
+
+      await cacheSurvey({
+        id: syncedId,
+        projectId: survey.project_id,
+        surveyType: survey.survey_type,
+        surveyDate: survey.survey_date,
+        status: survey.status,
+        weather: { templateFields: allFields },
+        formData,
+        notes: null,
+        siteId: survey.site_id,
+      });
+
+      await markSurveySynced(survey.id);
+      await updatePhotoSurveyIds(survey.id, syncedId);
     }
   }
 }
@@ -165,17 +216,26 @@ async function syncPhotos(): Promise<void> {
   const pending = await getPendingPhotos();
 
   for (const photo of pending) {
+    // Photos without a remote survey_id yet — surveys sync has not completed
+    // mapping local→remote. Next sync pass will pick them up.
     if (!photo.survey_id) continue;
 
-    const result = await uploadPhoto({
-      localUri: photo.local_uri,
-      projectId: photo.project_id,
-      projectName: photo.project_name ?? undefined,
-      surveyId: photo.survey_id,
-    });
+    try {
+      const result = await uploadPhoto({
+        localUri: photo.local_uri,
+        projectId: photo.project_id,
+        projectName: photo.project_name ?? undefined,
+        surveyId: photo.survey_id,
+      });
 
-    if (result) {
-      await markPhotoSynced(photo.id);
+      if (result) {
+        await markPhotoSynced(photo.id);
+      } else {
+        await recordPhotoRetryFailure(photo.id, "upload returned null");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await recordPhotoRetryFailure(photo.id, msg);
     }
   }
 }

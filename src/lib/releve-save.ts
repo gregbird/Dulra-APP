@@ -32,7 +32,10 @@ export function buildFormDataFromReleve(
 /**
  * Insert a record into the releve_surveys table.
  * Called after the parent survey row is created in the surveys table.
- * Returns the new releve_surveys.id or null on failure.
+ *
+ * Returns the new releve_surveys.id, or null when there's no meaningful data
+ * to persist (missing releve_code/recorder — legitimate early-exit case).
+ * Throws on actual Supabase errors so callers can roll back the parent survey.
  */
 export async function insertReleveSurvey(params: {
   projectId: string;
@@ -40,8 +43,9 @@ export async function insertReleveSurvey(params: {
   surveyDate: string;
   releveFields: Partial<ReleveData>;
   userId?: string | null;
+  siteId?: string | null;
 }): Promise<string | null> {
-  const { projectId, surveyId, surveyDate, releveFields, userId } = params;
+  const { projectId, surveyId, surveyDate, releveFields, userId, siteId } = params;
 
   if (!releveFields.releve_code || !releveFields.recorder) {
     return null;
@@ -51,6 +55,7 @@ export async function insertReleveSurvey(params: {
     project_id: projectId,
     survey_id: surveyId,
     survey_date: surveyDate,
+    site_id: siteId ?? null,
     created_by: userId ?? null,
     ...releveFields,
   };
@@ -61,13 +66,15 @@ export async function insertReleveSurvey(params: {
     .select("id")
     .single();
 
-  if (error || !data) return null;
+  if (error) throw new Error(`releve_surveys insert failed: ${error.message}`);
+  if (!data) throw new Error("releve_surveys insert returned no row");
   return data.id;
 }
 
 /**
- * Delete + re-insert the releve_surveys row for an existing survey.
- * Used when editing a previously saved releve survey (web uses the same pattern).
+ * Atomic upsert of the releve_surveys row for an existing survey.
+ * Uses Supabase native upsert on survey_id (unique constraint required)
+ * so we never leave the table in an empty state between DELETE and INSERT.
  */
 export async function upsertReleveSurvey(params: {
   projectId: string;
@@ -75,13 +82,37 @@ export async function upsertReleveSurvey(params: {
   surveyDate: string;
   releveFields: Partial<ReleveData>;
   userId?: string | null;
+  siteId?: string | null;
 }): Promise<string | null> {
-  await supabase
-    .from("releve_surveys")
-    .delete()
-    .eq("survey_id", params.surveyId);
+  const { projectId, surveyId, surveyDate, releveFields, userId, siteId } = params;
 
-  return insertReleveSurvey(params);
+  if (!releveFields.releve_code || !releveFields.recorder) {
+    return null;
+  }
+
+  const row: Record<string, unknown> = {
+    project_id: projectId,
+    survey_id: surveyId,
+    survey_date: surveyDate,
+    site_id: siteId ?? null,
+    created_by: userId ?? null,
+    ...releveFields,
+  };
+
+  const { data, error } = await supabase
+    .from("releve_surveys")
+    .upsert(row, { onConflict: "survey_id" })
+    .select("id")
+    .single();
+
+  if (error) throw new Error(`releve_surveys upsert failed: ${error.message}`);
+  if (!data) throw new Error("releve_surveys upsert returned no row");
+
+  // Clear species for this releve so the subsequent insertReleveSpecies call
+  // can re-populate without leaving stale rows from a previous edit.
+  await supabase.from("releve_species").delete().eq("releve_id", data.id);
+
+  return data.id;
 }
 
 /**
@@ -165,7 +196,8 @@ export async function insertReleveSpecies(
 
   if (rows.length === 0) return;
 
-  await supabase.from("releve_species").insert(rows);
+  const { error } = await supabase.from("releve_species").insert(rows);
+  if (error) throw new Error(`releve_species insert failed: ${error.message}`);
 }
 
 /**

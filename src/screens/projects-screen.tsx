@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { cacheProject, getCachedProjects } from "@/lib/database";
+import { cacheAllData } from "@/lib/cache-refresh";
 import type { Project } from "@/types/project";
 
 const statusLabels: Record<string, string> = {
@@ -114,9 +115,22 @@ export default function ProjectsScreen() {
   useEffect(() => {
     fetchProjects().finally(() => setLoading(false));
   }, [fetchProjects]);
+  const loadFromCache = useCallback(async () => {
+    const cached = await getCachedProjects();
+    setProjects(cached.map((c) => ({
+      id: c.id, name: c.name, site_code: c.site_code, status: (c.status ?? "active") as Project["status"],
+      health_status: (c.health_status ?? "on_track") as Project["health_status"], county: c.county, updated_at: c.updated_at ?? "",
+    })));
+  }, []);
+
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchProjects();
+    const ok = await cacheAllData();
+    if (ok) {
+      await loadFromCache();
+    } else {
+      await fetchProjects();
+    }
     setRefreshing(false);
   };
   const formatDate = (dateStr: string) => {

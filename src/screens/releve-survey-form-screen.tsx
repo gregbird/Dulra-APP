@@ -18,6 +18,7 @@ import { RELEVE_SECTIONS } from "@/constants/releve-data";
 import type { FieldDef } from "@/constants/releve-data";
 import SurveyPhotos from "@/components/survey-photos";
 import type { SurveyPhotosHandle } from "@/components/survey-photos";
+import SurveyorPicker from "@/components/surveyor-picker";
 import SelectModal from "@/components/select-modal";
 import HabitatPicker, { FOSSITT_LEVEL3 } from "@/components/habitat-picker";
 import SpeciesRow from "@/components/species-row";
@@ -26,6 +27,8 @@ import { getReleveDefaults } from "@/lib/releve-save";
 import { getCachedSurvey, getCachedProjects, getPendingSurveyByRemoteId, cacheSurvey, getCachedProjectSites } from "@/lib/database";
 import type { FormData } from "@/types/survey-template";
 import type { ReleveSpeciesEntry } from "@/types/releve";
+import { useDevEventStore } from "@/lib/dev-events";
+import { generateTestReleveFormData } from "@/lib/dev-fill-data";
 
 /* ── Main screen ────────────────────────────────────────────── */
 
@@ -41,6 +44,19 @@ export default function ReleveSurveyFormScreen() {
   const [projectName, setProjectName] = useState("");
   const [formData, setFormData] = useState<FormData>({});
   const [species, setSpecies] = useState<ReleveSpeciesEntry[]>([]);
+  const [surveyorId, setSurveyorId] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
+  const speciesKeysRef = useRef<string[]>([]);
+  const nextSpeciesKeyRef = useRef(0);
+  const ensureSpeciesKeys = (count: number) => {
+    while (speciesKeysRef.current.length < count) {
+      speciesKeysRef.current.push(`sp_${nextSpeciesKeyRef.current++}`);
+    }
+    if (speciesKeysRef.current.length > count) {
+      speciesKeysRef.current = speciesKeysRef.current.slice(0, count);
+    }
+  };
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["basic"]));
   const [activeSelect, setActiveSelect] = useState<{ sectionId: string; field: FieldDef } | null>(null);
   const [showHabitatPicker, setShowHabitatPicker] = useState(false);
@@ -104,6 +120,23 @@ export default function ReleveSurveyFormScreen() {
 
   const init = useCallback(async () => {
     try {
+      // Resolve current user for surveyor attribution default
+      try {
+        const { supabase } = await import("@/lib/supabase");
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user?.id) {
+          setCurrentUserId(session.user.id);
+          try {
+            const { data: profile } = await supabase
+              .from("profiles")
+              .select("full_name")
+              .eq("id", session.user.id)
+              .single();
+            if (profile?.full_name) setCurrentUserName(profile.full_name);
+          } catch { /* offline */ }
+        }
+      } catch { /* offline */ }
+
       // For existing surveys, check pending (unsynced) edits first — no network needed
       if (!isNew && surveyId) {
         const pending = await getPendingSurveyByRemoteId(surveyId);
@@ -201,6 +234,17 @@ export default function ReleveSurveyFormScreen() {
     init().finally(() => setLoading(false));
   }, [init]);
 
+  const fillToken = useDevEventStore((s) => s.fillToken);
+  const clearFillToken = useDevEventStore((s) => s.clearFillToken);
+  useEffect(() => {
+    if (!__DEV__ || fillToken == null || loading) return;
+    const { formData: gen, species: genSpecies } = generateTestReleveFormData();
+    setFormData((prev) => ({ ...prev, ...gen }));
+    ensureSpeciesKeys(genSpecies.length);
+    setSpecies(genSpecies);
+    clearFillToken();
+  }, [fillToken, loading, clearFillToken]);
+
   const updateField = (sectionId: string, key: string, value: string) => {
     setFormData((prev) => ({
       ...prev,
@@ -220,6 +264,7 @@ export default function ReleveSurveyFormScreen() {
   /* ── Species handlers ── */
 
   const addSpecies = () => {
+    speciesKeysRef.current.push(`sp_${nextSpeciesKeyRef.current++}`);
     setSpecies((prev) => [
       ...prev,
       { species_name_latin: "", species_name_english: null, species_cover_domin: null, species_cover_pct: null, notes: null },
@@ -232,6 +277,8 @@ export default function ReleveSurveyFormScreen() {
       const entry = { ...next[index] };
       if (field === "species_cover_domin" || field === "species_cover_pct") {
         entry[field] = value === "" ? null : Number(value);
+      } else if (field === "species_name_latin") {
+        entry[field] = value;
       } else {
         entry[field] = value || null;
       }
@@ -241,6 +288,7 @@ export default function ReleveSurveyFormScreen() {
   };
 
   const removeSpecies = (index: number) => {
+    speciesKeysRef.current.splice(index, 1);
     setSpecies((prev) => prev.filter((_, i) => i !== index));
   };
 
@@ -269,6 +317,7 @@ export default function ReleveSurveyFormScreen() {
       markComplete,
       pendingPhotoUris: pendingUris,
       siteId: params.siteId ?? null,
+      surveyorId,
     });
 
     if (result.offline) {
@@ -327,6 +376,13 @@ export default function ReleveSurveyFormScreen() {
       />
       <KeyboardAvoidingView style={s.container} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+
+          <SurveyorPicker
+            value={surveyorId}
+            currentUserId={currentUserId}
+            currentUserName={currentUserName}
+            onChange={(userId) => setSurveyorId(userId)}
+          />
 
           <SurveyPhotos ref={photosRef} surveyId={surveyId} projectId={projectId} projectName={projectName} />
 
@@ -413,9 +469,18 @@ export default function ReleveSurveyFormScreen() {
             </TouchableOpacity>
             {expandedSections.has("species") && (
               <View style={s.sectionBody}>
-                {species.map((entry, i) => (
-                  <SpeciesRow key={i} entry={entry} index={i} onChange={updateSpecies} onRemove={removeSpecies} />
-                ))}
+                {(() => {
+                  ensureSpeciesKeys(species.length);
+                  return species.map((entry, i) => (
+                    <SpeciesRow
+                      key={speciesKeysRef.current[i]}
+                      entry={entry}
+                      index={i}
+                      onChange={updateSpecies}
+                      onRemove={removeSpecies}
+                    />
+                  ));
+                })()}
                 <TouchableOpacity style={s.addBtn} activeOpacity={0.7} onPress={addSpecies}>
                   <Ionicons name="add-circle-outline" size={22} color={colors.primary.DEFAULT} />
                   <Text style={s.addBtnText}>Add Species</Text>

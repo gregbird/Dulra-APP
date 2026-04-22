@@ -4,6 +4,7 @@ import { useLocalSearchParams, Stack } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedTargetNotes } from "@/lib/database";
+import { cacheAllData } from "@/lib/cache-refresh";
 import TargetNotesList from "@/components/target-notes-list";
 import type { TargetNote } from "@/types/habitat";
 
@@ -36,9 +37,21 @@ export default function TargetNotesScreen() {
     fetchNotes().finally(() => setLoading(false));
   }, [fetchNotes]);
 
+  const loadFromCache = useCallback(async () => {
+    if (!id) return;
+    let cached = await getCachedTargetNotes(id);
+    if (siteId) cached = cached.filter((n) => n.site_id === siteId || n.site_id === null);
+    setNotes(cached as TargetNote[]);
+  }, [id, siteId]);
+
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchNotes();
+    const ok = await cacheAllData();
+    if (ok) {
+      await loadFromCache();
+    } else {
+      await fetchNotes();
+    }
     setRefreshing(false);
   };
 

@@ -18,10 +18,13 @@ import { colors } from "@/constants/colors";
 import DynamicField from "@/components/dynamic-field";
 import SurveyPhotos from "@/components/survey-photos";
 import type { SurveyPhotosHandle } from "@/components/survey-photos";
+import SurveyorPicker from "@/components/surveyor-picker";
 import { getCachedTemplate, cacheTemplate, getCachedSurvey } from "@/lib/database";
 import { saveSurvey } from "@/lib/survey-save";
 import type { SurveyTemplate, TemplateSection, TemplateField, FormData } from "@/types/survey-template";
 import { surveyTypeLabels } from "@/types/survey";
+import { useDevEventStore } from "@/lib/dev-events";
+import { generateTestFormData } from "@/lib/dev-fill-data";
 
 function SectionFields({
   fields,
@@ -76,6 +79,9 @@ export default function SurveyFormScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+  const [surveyorId, setSurveyorId] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
   const photosRef = useRef<SurveyPhotosHandle>(null);
 
   const loadTemplate = useCallback(async (type: string) => {
@@ -173,6 +179,20 @@ export default function SurveyFormScreen() {
   useEffect(() => {
     const init = async () => {
       try {
+        // Resolve current user for surveyor attribution default
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user?.id) {
+          setCurrentUserId(session.user.id);
+          try {
+            const { data: profile } = await supabase
+              .from("profiles")
+              .select("full_name")
+              .eq("id", session.user.id)
+              .single();
+            if (profile?.full_name) setCurrentUserName(profile.full_name);
+          } catch { /* offline — currentUserName stays null, picker shows "Me" */ }
+        }
+
         if (isNew && surveyType) {
           await loadTemplate(surveyType);
           if (params.projectId) {
@@ -191,6 +211,15 @@ export default function SurveyFormScreen() {
     };
     init();
   }, []);
+
+  const fillToken = useDevEventStore((s) => s.fillToken);
+  const clearFillToken = useDevEventStore((s) => s.clearFillToken);
+  useEffect(() => {
+    if (!__DEV__ || fillToken == null || !template) return;
+    setFormData((prev) => ({ ...prev, ...generateTestFormData(template) }));
+    clearFillToken();
+  }, [fillToken, template, clearFillToken]);
+
   const toggleSection = (sectionId: string) => {
     setExpandedSections((prev) => {
       const next = new Set(prev);
@@ -211,6 +240,7 @@ export default function SurveyFormScreen() {
       surveyId, projectId, projectName, surveyType,
       formData, markComplete, pendingPhotoUris: pendingUris,
       siteId: params.siteId ?? null,
+      surveyorId,
     });
 
     if (result.offline) {
@@ -312,6 +342,13 @@ export default function SurveyFormScreen() {
               </Text>
             </View>
           )}
+
+          <SurveyorPicker
+            value={surveyorId}
+            currentUserId={currentUserId}
+            currentUserName={currentUserName}
+            onChange={(userId) => setSurveyorId(userId)}
+          />
 
           <SurveyPhotos ref={photosRef} surveyId={surveyId} projectId={projectId} projectName={projectName} />
 

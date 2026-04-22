@@ -59,8 +59,11 @@ async function uploadBase64(base64: string, storagePath: string): Promise<boolea
 export async function uploadPhoto(params: UploadPhotoParams): Promise<UploadResult | null> {
   const { localUri, projectId, projectName, surveyId, habitatPolygonId, targetNoteId } = params;
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  // getSession reads cached session without a network round-trip; getUser validates
+  // server-side on every call which adds latency and fails offline during bulk photo sync.
+  const { data: { session } } = await supabase.auth.getSession();
+  const userId = session?.user?.id;
+  if (!userId) return null;
 
   const location = await getLocation();
   const timestamp = Date.now();
@@ -125,7 +128,7 @@ export async function uploadPhoto(params: UploadPhotoParams): Promise<UploadResu
       location: locationPoint,
       taken_at: new Date().toISOString(),
       caption: fileName,
-      created_by: user.id,
+      created_by: userId,
     })
     .select("id")
     .single();

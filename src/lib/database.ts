@@ -9,32 +9,49 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   return db;
 }
 
+async function tryAddColumn(database: SQLite.SQLiteDatabase, table: string, column: string, definition: string): Promise<void> {
+  try {
+    await database.execAsync(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+  } catch {
+    // Column already exists or table missing — non-fatal; CREATE TABLE IF NOT EXISTS covers missing tables
+  }
+}
+
 async function initTables(database: SQLite.SQLiteDatabase) {
   await database.execAsync(`
     CREATE TABLE IF NOT EXISTS db_version (version INTEGER);
   `);
   const ver = await database.getFirstAsync<{ version: number }>(`SELECT version FROM db_version LIMIT 1`);
-  if (!ver || ver.version < 4) {
-    if (ver && ver.version === 3) {
+  const currentVer = ver?.version ?? 0;
+
+  if (currentVer < 5) {
+    // Preserve pending data on every upgrade path. Only cache_* tables may be rebuilt
+    // (they refill from Supabase on next online session). Never DROP pending_surveys
+    // or pending_photos — those contain unsynced field work.
+    await tryAddColumn(database, "pending_surveys", "remote_id", "TEXT");
+    await tryAddColumn(database, "pending_surveys", "site_id", "TEXT");
+    await tryAddColumn(database, "cached_surveys", "site_id", "TEXT");
+    await tryAddColumn(database, "cached_habitats", "site_id", "TEXT");
+    await tryAddColumn(database, "cached_target_notes", "site_id", "TEXT");
+    await tryAddColumn(database, "pending_photos", "retry_count", "INTEGER DEFAULT 0");
+    await tryAddColumn(database, "pending_photos", "last_error", "TEXT");
+
+    // Enum migration is safe at any version — UPDATE is a no-op if values don't exist.
+    try {
       await database.execAsync(`
         UPDATE pending_surveys SET status = 'in_progress' WHERE status = 'planned';
         UPDATE pending_surveys SET status = 'completed' WHERE status = 'approved';
       `);
-      await database.execAsync(`DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
-    } else {
-      await database.execAsync(`DROP TABLE IF EXISTS pending_surveys; DROP TABLE IF EXISTS pending_photos; DROP TABLE IF EXISTS cached_templates; DROP TABLE IF EXISTS cached_surveys; DROP TABLE IF EXISTS cached_projects; DROP TABLE IF EXISTS cached_habitats; DROP TABLE IF EXISTS cached_target_notes;`);
-    }
-    await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (5)`);
-  }
+    } catch { /* pending_surveys may not exist on first run — CREATE below handles it */ }
 
-  if (ver && ver.version === 4) {
     await database.execAsync(`
-      ALTER TABLE cached_surveys ADD COLUMN site_id TEXT;
-      ALTER TABLE cached_habitats ADD COLUMN site_id TEXT;
-      ALTER TABLE cached_target_notes ADD COLUMN site_id TEXT;
-      ALTER TABLE pending_surveys ADD COLUMN site_id TEXT;
+      DROP TABLE IF EXISTS cached_templates;
+      DROP TABLE IF EXISTS cached_surveys;
+      DROP TABLE IF EXISTS cached_projects;
+      DROP TABLE IF EXISTS cached_habitats;
+      DROP TABLE IF EXISTS cached_target_notes;
     `);
+
     await database.execAsync(`
       CREATE TABLE IF NOT EXISTS cached_project_sites (
         id TEXT PRIMARY KEY,
@@ -46,7 +63,19 @@ async function initTables(database: SQLite.SQLiteDatabase) {
         cached_at TEXT NOT NULL
       );
     `);
-    await database.runAsync(`UPDATE db_version SET version = 5`);
+
+    await database.runAsync(`DELETE FROM db_version`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (5)`);
+  }
+
+  if (currentVer < 6) {
+    // Earlier v5 builds shipped without these pending_photos columns; the
+    // ALTERs in the v5 block were added later, so users already on v5 skip them.
+    // tryAddColumn is idempotent — safe to re-run for users who already have them.
+    await tryAddColumn(database, "pending_photos", "retry_count", "INTEGER NOT NULL DEFAULT 0");
+    await tryAddColumn(database, "pending_photos", "last_error", "TEXT");
+    await database.runAsync(`DELETE FROM db_version`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (6)`);
   }
 
   await database.execAsync(`
@@ -74,6 +103,8 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       survey_id TEXT,
       survey_local_id TEXT,
       sync_status TEXT NOT NULL DEFAULT 'pending',
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -147,6 +178,13 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       site_name TEXT,
       sort_order INTEGER,
       county TEXT,
+      cached_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cached_profiles (
+      id TEXT PRIMARY KEY,
+      full_name TEXT,
+      role TEXT,
       cached_at TEXT NOT NULL
     );
   `);
@@ -272,6 +310,8 @@ export async function savePhotoLocally(params: {
   return id;
 }
 
+const PHOTO_MAX_RETRIES = 5;
+
 export async function getPendingPhotos(): Promise<Array<{
   id: string;
   local_uri: string;
@@ -279,10 +319,13 @@ export async function getPendingPhotos(): Promise<Array<{
   project_name: string | null;
   survey_id: string | null;
   survey_local_id: string | null;
+  retry_count: number;
 }>> {
   const database = await getDatabase();
   return database.getAllAsync(
-    `SELECT * FROM pending_photos WHERE sync_status = 'pending'`
+    `SELECT id, local_uri, project_id, project_name, survey_id, survey_local_id, retry_count
+     FROM pending_photos WHERE sync_status = 'pending' AND retry_count < ?`,
+    PHOTO_MAX_RETRIES
   );
 }
 
@@ -290,6 +333,14 @@ export async function markPhotoSynced(localId: string): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
     `UPDATE pending_photos SET sync_status = 'synced' WHERE id = ?`, localId
+  );
+}
+
+export async function recordPhotoRetryFailure(localId: string, errorMessage: string): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE pending_photos SET retry_count = retry_count + 1, last_error = ? WHERE id = ?`,
+    errorMessage.slice(0, 500), localId
   );
 }
 
@@ -475,9 +526,33 @@ export async function getCachedProjectSites(projectId: string): Promise<Array<{
   );
 }
 
+export async function cacheProfile(params: {
+  id: string; fullName: string | null; role: string | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO cached_profiles (id, full_name, role, cached_at) VALUES (?, ?, ?, ?)`,
+    params.id, params.fullName, params.role, new Date().toISOString()
+  );
+}
+
+export async function getCachedProfiles(): Promise<Array<{
+  id: string; full_name: string | null; role: string | null;
+}>> {
+  const database = await getDatabase();
+  return database.getAllAsync(
+    `SELECT id, full_name, role FROM cached_profiles ORDER BY full_name`
+  );
+}
+
 export async function clearCachedData(): Promise<void> {
   const database = await getDatabase();
-  await database.execAsync(`DELETE FROM cached_projects; DELETE FROM cached_surveys; DELETE FROM cached_templates; DELETE FROM cached_habitats; DELETE FROM cached_target_notes; DELETE FROM cached_project_sites;`);
+  await database.execAsync(`DELETE FROM cached_projects; DELETE FROM cached_surveys; DELETE FROM cached_templates; DELETE FROM cached_habitats; DELETE FROM cached_target_notes; DELETE FROM cached_project_sites; DELETE FROM cached_profiles;`);
+}
+
+export async function clearPendingData(): Promise<void> {
+  const database = await getDatabase();
+  await database.execAsync(`DELETE FROM pending_surveys; DELETE FROM pending_photos;`);
 }
 
 export async function getPendingCount(): Promise<number> {

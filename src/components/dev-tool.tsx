@@ -1,21 +1,66 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
-  StyleSheet,
   PanResponder,
   Animated,
   Alert,
   Modal,
+  ScrollView,
 } from "react-native";
+import NetInfo from "@react-native-community/netinfo";
 import { Ionicons } from "@expo/vector-icons";
+import { useGlobalSearchParams, usePathname } from "expo-router";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
+import { useDevEventStore } from "@/lib/dev-events";
+import { useNetworkStore } from "@/lib/network";
+import { clearCachedData, clearPendingData } from "@/lib/database";
+import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
+import { cacheAllData } from "@/lib/cache-refresh";
+import { createOneSurvey, createTestHabitat, createTestTargetNote } from "@/lib/dev-actions";
+import { surveyTypeLabels } from "@/types/survey";
+import { devToolStyles as s } from "@/components/dev-tool-styles";
+
+const QUICK_CREATE_TYPES = [
+  "releve_survey",
+  "aquatic_survey",
+  "bat_survey",
+  "bird_survey",
+  "botanical_survey",
+  "habitat_mapping",
+  "invertebrate_survey",
+  "mammal_survey",
+  "walkover",
+  "other",
+];
+
+const BATCH_TYPES = ["bat_survey", "bird_survey", "botanical_survey", "walkover", "releve_survey"];
+
+function useActiveProjectId(): string | null {
+  const params = useGlobalSearchParams<{ id?: string; projectId?: string }>();
+  const pathname = usePathname();
+  if (pathname.startsWith("/project/") && params.id && params.id !== "[id]") return params.id;
+  if (params.projectId) return params.projectId;
+  return null;
+}
+
+function useIsOnFormScreen(): boolean {
+  const pathname = usePathname();
+  return pathname.startsWith("/survey/") || pathname.startsWith("/releve-survey/");
+}
 
 export default function DevTool() {
   const [menuVisible, setMenuVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
   const pan = useRef(new Animated.ValueXY({ x: 20, y: 100 })).current;
+  const requestFill = useDevEventStore((s) => s.requestFill);
+  const requestAddPhotos = useDevEventStore((s) => s.requestAddPhotos);
+  const devForcedOffline = useNetworkStore((s) => s.devForcedOffline);
+  const pendingCount = useNetworkStore((s) => s.pendingCount);
+  const projectId = useActiveProjectId();
+  const isOnForm = useIsOnFormScreen();
 
   const panResponder = useRef(
     PanResponder.create({
@@ -39,6 +84,10 @@ export default function DevTool() {
     })
   ).current;
 
+  const quickCreateLabels = useMemo(() => {
+    return QUICK_CREATE_TYPES.map((t) => ({ type: t, label: surveyTypeLabels[t] ?? t }));
+  }, []);
+
   const handleLogout = () => {
     Alert.alert("Sign Out", "Are you sure you want to sign out?", [
       { text: "Cancel", style: "cancel" },
@@ -53,28 +102,161 @@ export default function DevTool() {
     ]);
   };
 
-  const handleClearCache = () => {
-    Alert.alert("Clear Cache", "Clear local cache?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Clear",
-        style: "destructive",
-        onPress: () => {
-          setMenuVisible(false);
-          Alert.alert("Done", "Cache cleared.");
+  const handleWipeAll = () => {
+    Alert.alert(
+      "Wipe All Local",
+      "Deletes ALL cached data and ALL pending (unsynced) surveys and photos. Remote Supabase data is not touched. If online, cache will be re-populated afterwards.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Wipe",
+          style: "destructive",
+          onPress: async () => {
+            setMenuVisible(false);
+            await clearCachedData();
+            await clearPendingData();
+            await refreshPendingCount();
+            const online = useNetworkStore.getState().isOnline;
+            if (online) {
+              const refilled = await cacheAllData();
+              Alert.alert("Done", refilled ? "Local wiped, cache refilled from Supabase." : "Local wiped. Cache refill skipped (offline or auth).");
+            } else {
+              Alert.alert("Done", "Local wiped. Go online to repopulate cache.");
+            }
+          },
         },
-      },
-    ]);
+      ],
+    );
+  };
+
+  const handleFillForm = () => {
+    requestFill();
+    setMenuVisible(false);
+  };
+
+  const handleAddTestPhotos = () => {
+    requestAddPhotos();
+    setMenuVisible(false);
+  };
+
+  const handleForceSync = async () => {
+    if (busy) return;
+    if (!useNetworkStore.getState().isOnline) {
+      Alert.alert("Offline", "Cannot sync while offline. Toggle offline mode off or reconnect first.");
+      return;
+    }
+    setBusy(true);
+    setMenuVisible(false);
+    try {
+      const before = pendingCount;
+      await syncPendingData();
+      const after = useNetworkStore.getState().pendingCount;
+      Alert.alert("Sync", `Before: ${before} pending\nAfter: ${after} pending`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggleOffline = async () => {
+    const next = !devForcedOffline;
+    useNetworkStore.getState().setDevForcedOffline(next);
+    if (next) {
+      useNetworkStore.getState().setOnline(false);
+      setMenuVisible(false);
+      return;
+    }
+    let online = true;
+    try {
+      const state = await NetInfo.fetch();
+      online = state.isConnected === true;
+    } catch { /* keep online=true default */ }
+    useNetworkStore.getState().setOnline(online);
+    setMenuVisible(false);
+    // Mimic the real reconnect behaviour — kick off a sync if there's a queue.
+    if (online) {
+      try { await syncPendingData(); } catch { /* ignore */ }
+    }
+  };
+
+  const quickCreate = async (surveyType: string) => {
+    if (busy) return;
+    if (!projectId) {
+      Alert.alert("No project", "Open a project first, then try Quick Create.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await createOneSurvey(surveyType, projectId);
+      setMenuVisible(false);
+      const label = surveyTypeLabels[surveyType] ?? surveyType;
+      if (result === "offline") Alert.alert("Saved Offline", `${label} created locally. Will sync on reconnect.`);
+      else if (result === "online") Alert.alert("Created", `${label} saved.`);
+      else if (result === "failed") Alert.alert("Failed", `Template missing or save failed for "${label}".`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createHabitat = async () => {
+    if (busy || !projectId) {
+      if (!projectId) Alert.alert("No project", "Open a project first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await createTestHabitat(projectId);
+      setMenuVisible(false);
+      if (r.ok) Alert.alert("Created", "Test habitat polygon inserted. Pull to refresh the habitats list.");
+      else Alert.alert("Failed", `Habitat insert failed — ${r.reason}.\n(No offline queue for habitats; must be online with insert permission.)`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createTargetNote = async () => {
+    if (busy || !projectId) {
+      if (!projectId) Alert.alert("No project", "Open a project first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await createTestTargetNote(projectId);
+      setMenuVisible(false);
+      if (r.ok) Alert.alert("Created", "Test target note inserted. Pull to refresh the target notes list.");
+      else Alert.alert("Failed", `Target note insert failed — ${r.reason}.\n(No offline queue for target notes; must be online with insert permission.)`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleBatchCreate = async () => {
+    if (busy) return;
+    if (!projectId) {
+      Alert.alert("No project", "Open a project first, then try Batch Create.");
+      return;
+    }
+    setBusy(true);
+    setMenuVisible(false);
+    const summary: Record<string, number> = { online: 0, offline: 0, failed: 0 };
+    for (const t of BATCH_TYPES) {
+      const r = await createOneSurvey(t, projectId);
+      summary[r] = (summary[r] ?? 0) + 1;
+    }
+    setBusy(false);
+    Alert.alert(
+      "Batch Create",
+      `Online: ${summary.online ?? 0}\nOffline: ${summary.offline ?? 0}\nFailed: ${summary.failed ?? 0}`,
+    );
   };
 
   return (
     <>
       <Animated.View
-        style={[styles.fab, { transform: pan.getTranslateTransform() }]}
+        style={[s.fab, { transform: pan.getTranslateTransform() }]}
         {...panResponder.panHandlers}
       >
         <TouchableOpacity
-          style={styles.fabButton}
+          style={s.fabButton}
           onPress={() => setMenuVisible(true)}
           activeOpacity={0.8}
         >
@@ -89,35 +271,123 @@ export default function DevTool() {
         onRequestClose={() => setMenuVisible(false)}
       >
         <TouchableOpacity
-          style={styles.overlay}
+          style={s.overlay}
           activeOpacity={1}
           onPress={() => setMenuVisible(false)}
         >
-          <View style={styles.menu}>
-            <Text style={styles.menuTitle}>Dev Tools</Text>
+          <View style={s.menu}>
+            <Text style={s.menuTitle}>Dev Tools</Text>
+
+            <ScrollView style={s.menuScroll} contentContainerStyle={s.menuScrollContent} showsVerticalScrollIndicator={false}>
+              <Text style={s.sectionLabel}>Form</Text>
+              <TouchableOpacity
+                style={[s.menuItem, !isOnForm && s.menuItemDisabled]}
+                onPress={handleFillForm}
+                activeOpacity={isOnForm ? 0.7 : 1}
+                disabled={!isOnForm}
+              >
+                <Text style={[s.menuItemText, !isOnForm && s.menuItemTextDisabled]}>
+                  {isOnForm ? "Fill Current Form" : "Fill Current Form (open a form first)"}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.menuItem, !isOnForm && s.menuItemDisabled]}
+                onPress={handleAddTestPhotos}
+                activeOpacity={isOnForm ? 0.7 : 1}
+                disabled={!isOnForm}
+              >
+                <Text style={[s.menuItemText, !isOnForm && s.menuItemTextDisabled]}>
+                  {isOnForm ? "Add 2 Test Photos" : "Add Test Photos (open a form first)"}
+                </Text>
+              </TouchableOpacity>
+
+              <Text style={s.sectionLabel}>Sync</Text>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary, busy && s.menuItemDisabled]}
+                onPress={handleForceSync}
+                activeOpacity={busy ? 1 : 0.7}
+                disabled={busy}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary]}>
+                  Force Sync Now ({pendingCount} pending)
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary, devForcedOffline && s.menuItemWarn]}
+                onPress={handleToggleOffline}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary, devForcedOffline && s.menuItemTextWarn]}>
+                  {devForcedOffline ? "Offline Forced — Tap to Resume" : "Force Offline Mode"}
+                </Text>
+              </TouchableOpacity>
+
+              <Text style={s.sectionLabel}>
+                Quick Create {projectId ? "" : "(open a project first)"}
+              </Text>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary, (!projectId || busy) && s.menuItemDisabled]}
+                onPress={handleBatchCreate}
+                activeOpacity={projectId && !busy ? 0.7 : 1}
+                disabled={!projectId || busy}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary, (!projectId || busy) && s.menuItemTextDisabled]}>
+                  Batch Create ({BATCH_TYPES.length} mixed)
+                </Text>
+              </TouchableOpacity>
+              {quickCreateLabels.map(({ type, label }) => (
+                <TouchableOpacity
+                  key={type}
+                  style={[s.menuItem, s.menuItemSecondary, (!projectId || busy) && s.menuItemDisabled]}
+                  onPress={() => quickCreate(type)}
+                  activeOpacity={projectId && !busy ? 0.7 : 1}
+                  disabled={!projectId || busy}
+                >
+                  <Text style={[s.menuItemText, s.menuItemTextSecondary, (!projectId || busy) && s.menuItemTextDisabled]}>
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+
+              <Text style={s.sectionLabel}>
+                Project Data {projectId ? "" : "(open a project first)"}
+              </Text>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary, (!projectId || busy) && s.menuItemDisabled]}
+                onPress={createHabitat}
+                activeOpacity={projectId && !busy ? 0.7 : 1}
+                disabled={!projectId || busy}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary, (!projectId || busy) && s.menuItemTextDisabled]}>
+                  Create Test Habitat
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary, (!projectId || busy) && s.menuItemDisabled]}
+                onPress={createTargetNote}
+                activeOpacity={projectId && !busy ? 0.7 : 1}
+                disabled={!projectId || busy}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary, (!projectId || busy) && s.menuItemTextDisabled]}>
+                  Create Test Target Note
+                </Text>
+              </TouchableOpacity>
+
+              <Text style={s.sectionLabel}>System</Text>
+              <TouchableOpacity style={s.menuItem} onPress={handleLogout} activeOpacity={0.7}>
+                <Text style={s.menuItemText}>Sign Out</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.menuItem} onPress={handleWipeAll} activeOpacity={0.7}>
+                <Text style={s.menuItemText}>Wipe All Local</Text>
+              </TouchableOpacity>
+            </ScrollView>
 
             <TouchableOpacity
-              style={styles.menuItem}
-              onPress={handleLogout}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.menuItemText}>Sign Out</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={handleClearCache}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.menuItemText}>Clear Cache</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.menuItem, styles.menuItemClose]}
+              style={[s.menuItem, s.menuItemClose]}
               onPress={() => setMenuVisible(false)}
               activeOpacity={0.7}
             >
-              <Text style={[styles.menuItemText, { color: colors.text.muted }]}>
+              <Text style={[s.menuItemText, { color: colors.text.muted }]}>
                 Close
               </Text>
             </TouchableOpacity>
@@ -128,63 +398,3 @@ export default function DevTool() {
   );
 }
 
-const styles = StyleSheet.create({
-  fab: {
-    position: "absolute",
-    zIndex: 9999,
-  },
-  fabButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: "#EF4444",
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  fabText: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#FFFFFF",
-  },
-  overlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.4)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  menu: {
-    backgroundColor: colors.white,
-    borderRadius: 16,
-    padding: 24,
-    width: 260,
-  },
-  menuTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.text.heading,
-    marginBottom: 20,
-    textAlign: "center",
-  },
-  menuItem: {
-    height: 48,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: colors.background.page,
-    borderRadius: 10,
-    marginBottom: 10,
-  },
-  menuItemClose: {
-    backgroundColor: "transparent",
-    marginBottom: 0,
-  },
-  menuItemText: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#EF4444",
-  },
-});
