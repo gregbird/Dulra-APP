@@ -33,29 +33,40 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
   global: {
     fetch: async (url, options) => {
-      if (__DEV__) {
-        try {
-          const { useNetworkStore } = await import("@/lib/network");
-          if (useNetworkStore.getState().devForcedOffline) {
-            const urlStr = typeof url === "string" ? url : "";
-            const body = urlStr.includes("/auth/")
-              ? JSON.stringify({ error: "network_error", error_description: "Dev forced offline" })
-              : JSON.stringify({ message: "Dev forced offline", code: "NETWORK_ERROR" });
-            return new Response(body, { status: 503, headers: { "Content-Type": "application/json" } });
-          }
-        } catch { /* network module not ready */ }
-      }
+      const urlStr = typeof url === "string" ? url : "";
+      const offlineResponse = (reason: string) => {
+        const body = urlStr.includes("/auth/")
+          ? JSON.stringify({ error: "network_error", error_description: reason })
+          : JSON.stringify({ message: reason, code: "NETWORK_ERROR" });
+        return new Response(body, { status: 503, headers: { "Content-Type": "application/json" } });
+      };
+
+      // Short-circuit when we already know the network is down. Without this
+      // every screen's "try Supabase → fall back to cache" pattern would sit
+      // on the OS fetch timeout (30-60s on iOS) before bailing — the reason
+      // offline screens felt frozen on first load.
       try {
-        return await fetch(url, options);
+        const { useNetworkStore } = await import("@/lib/network");
+        const state = useNetworkStore.getState();
+        if (__DEV__ && state.devForcedOffline) return offlineResponse("Dev forced offline");
+        if (!state.isOnline) return offlineResponse("Network request failed");
+      } catch { /* network module not yet initialized — fall through to real fetch */ }
+
+      // Online (per NetInfo) but real connectivity may still be flaky: cap
+      // any single request at 10s so stuck sockets don't block the UI.
+      // Longer than this the user will have bailed out anyway.
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10_000);
+      try {
+        return await fetch(url, { ...options, signal: controller.signal });
       } catch (e) {
-        if (e instanceof TypeError && String(e.message).includes("Network request failed")) {
-          const urlStr = typeof url === "string" ? url : "";
-          const body = urlStr.includes("/auth/")
-            ? JSON.stringify({ error: "network_error", error_description: "Network request failed" })
-            : JSON.stringify({ message: "Network request failed", code: "NETWORK_ERROR" });
-          return new Response(body, { status: 503, headers: { "Content-Type": "application/json" } });
-        }
+        const msg = e instanceof Error ? e.message : String(e);
+        const isNetwork = e instanceof TypeError && msg.includes("Network request failed");
+        const isAbort = (e as { name?: string })?.name === "AbortError";
+        if (isNetwork || isAbort) return offlineResponse(isAbort ? "Request timed out" : "Network request failed");
         throw e;
+      } finally {
+        clearTimeout(timeoutId);
       }
     },
   },

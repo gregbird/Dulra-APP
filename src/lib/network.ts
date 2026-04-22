@@ -14,7 +14,12 @@ interface NetworkState {
 }
 
 export const useNetworkStore = create<NetworkState>((set) => ({
-  isOnline: true,
+  // Pessimistic default. Real value is set by the NetInfo probe in
+  // startNetworkListener a few hundred ms after launch. Starting at `false`
+  // means the tiny window before that probe resolves is treated as offline
+  // — screens use their cache immediately instead of burning a 30-60s
+  // iOS fetch timeout while the app thinks it's online.
+  isOnline: false,
   pendingCount: 0,
   syncing: false,
   devForcedOffline: false,

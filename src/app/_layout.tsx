@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, AppState, View } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { Session } from "@supabase/supabase-js";
 import { supabase, setupTokenRefresh } from "@/lib/supabase";
@@ -10,6 +10,11 @@ import SyncIndicator from "@/components/sync-indicator";
 import { startNetworkListener, useNetworkStore } from "@/lib/network";
 import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
 import { cacheAllData } from "@/lib/cache-refresh";
+
+// Don't hammer the network every time the user briefly leaves the app —
+// only auto-refresh if they've been away this long. Short app switches
+// (1-2 minutes) reuse the existing cache.
+const AUTO_REFRESH_MIN_BACKGROUND_MS = 30_000;
 
 export default function RootLayout() {
   const [session, setSession] = useState<Session | null>(null);
@@ -46,6 +51,8 @@ export default function RootLayout() {
     return () => subscription.unsubscribe();
   }, []);
 
+  const backgroundedAtRef = useRef<number | null>(null);
+
   useEffect(() => {
     startNetworkListener(syncPendingData);
     refreshPendingCount();
@@ -56,6 +63,31 @@ export default function RootLayout() {
       if (!isFatal && String(error?.message).includes("Network request failed")) return;
       prev(error, isFatal);
     });
+
+    // Foreground auto-refresh: when the user reopens the app after being
+    // away for a while (AUTO_REFRESH_MIN_BACKGROUND_MS), if they're online,
+    // re-pull the cache from Supabase. Ecologists reopening at the office
+    // before field work get the latest projects/habitats/target notes without
+    // having to sign out or pull-to-refresh every screen.
+    const appStateSub = AppState.addEventListener("change", (next) => {
+      if (next === "background" || next === "inactive") {
+        backgroundedAtRef.current = Date.now();
+        return;
+      }
+      if (next !== "active") return;
+      const awayMs = backgroundedAtRef.current
+        ? Date.now() - backgroundedAtRef.current
+        : Infinity;
+      backgroundedAtRef.current = null;
+      if (awayMs < AUTO_REFRESH_MIN_BACKGROUND_MS) return;
+      if (!useNetworkStore.getState().isOnline) return;
+      if (!supabase.auth.getSession) return;
+      cacheAllData().catch(() => { /* swallow — next manual refresh will retry */ });
+    });
+
+    return () => {
+      appStateSub.remove();
+    };
   }, []);
 
   const isOnline = useNetworkStore((s) => s.isOnline);

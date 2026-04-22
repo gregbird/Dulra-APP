@@ -2,6 +2,7 @@
   "expo": {
     "name": "Dulra-APP",
     "slug": "Dulra-APP",
+    "owner": "apromania-2",
     "version": "1.0.0",
     "scheme": "dulra",
     "orientation": "portrait",
@@ -18,7 +19,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Take photos of species, habitats, and survey sites to include in your field records.",
         "NSLocationWhenInUseUsageDescription": "Your location is recorded with each observation so survey data can be mapped accurately.",
-        "NSPhotoLibraryUsageDescription": "Select photos from your library to attach as evidence to your survey records."
+        "NSPhotoLibraryUsageDescription": "Select photos from your library to attach as evidence to your survey records.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -28,7 +30,13 @@
         "monochromeImage": "./assets/dulra_logo.png"
       },
       "package": "com.dulra.dulradev",
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/dulra_logo.png"
@@ -47,6 +55,12 @@
           "locationWhenInUsePermission": "Your location is recorded with each observation so survey data can be mapped accurately."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "7efcd0bf-f6a8-4981-ae70-d788f6b1b1e1"
+      }
+    }
   }
 }
