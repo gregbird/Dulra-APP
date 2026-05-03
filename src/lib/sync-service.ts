@@ -129,8 +129,9 @@ async function syncSurveys(): Promise<void> {
             const species = extractSpeciesFromFormData(formData as Record<string, unknown>);
             await insertReleveSpecies(releveId, species);
           }
-        } catch {
-          // Leave pending for next sync retry
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await recordSurveyRetryFailure(survey.id, `releve sub-write (update path): ${msg}`);
           continue;
         }
       }
@@ -233,9 +234,12 @@ async function syncSurveys(): Promise<void> {
             const species = extractSpeciesFromFormData(formData as Record<string, unknown>);
             await insertReleveSpecies(releveId, species);
           }
-        } catch {
-          // Releve write failed — parent survey is fine; leave pending so next
-          // sync retries. markSurveySynced is skipped below.
+        } catch (e) {
+          // Releve write failed — parent survey is fine; record the error so
+          // it shows up in DevTool inspect and the retry counter ticks up
+          // (instead of looking permanently stuck at retry 0).
+          const msg = e instanceof Error ? e.message : String(e);
+          await recordSurveyRetryFailure(survey.id, `releve sub-write (insert path): ${msg}`);
           continue;
         }
       }
@@ -271,18 +275,30 @@ async function syncPhotos(): Promise<void> {
   const pending = await getPendingPhotos();
 
   for (const photo of pending) {
-    // Photos without a remote survey_id yet — surveys sync has not completed
-    // mapping local→remote, or the parent survey is in 'conflict' state and
-    // will never get a remote id. In the latter case the photo is orphaned
-    // forever; user can clean via DevTool → Drop Conflicts.
-    if (!photo.survey_id) continue;
+    // Photos with survey_local_id set but no survey_id yet are tied to a
+    // local survey that hasn't synced — wait for the next pass when the
+    // surveys loop calls updatePhotoSurveyIds. Photos with no survey
+    // reference at all (project / site-level) are independent and can
+    // sync immediately.
+    if (photo.survey_local_id && !photo.survey_id) continue;
+
+    let tags: string[] | null = null;
+    if (photo.tags) {
+      try {
+        const parsed = JSON.parse(photo.tags);
+        if (Array.isArray(parsed)) tags = parsed.filter((t): t is string => typeof t === "string");
+      } catch { /* malformed JSON — drop tags rather than fail the upload */ }
+    }
 
     try {
       const result = await uploadPhoto({
         localUri: photo.local_uri,
         projectId: photo.project_id,
         projectName: photo.project_name ?? undefined,
-        surveyId: photo.survey_id,
+        surveyId: photo.survey_id ?? undefined,
+        siteId: photo.site_id,
+        tags,
+        caption: photo.caption,
       });
 
       if (result) {

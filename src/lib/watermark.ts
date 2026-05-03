@@ -28,16 +28,19 @@ function formatCoord(lat: number | null, lng: number | null): string {
 }
 
 function formatDate(date: Date): string {
-  return date.toLocaleDateString("en-GB", {
-    day: "numeric", month: "short", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
+  // Web's overlay uses "1 Apr 2026 at 07:00" — keep mobile's burnt-in
+  // watermark in the same shape so the two render identically when web
+  // hides the UI overlay and falls back to whatever's already on the file.
+  const day = date.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${day} at ${time}`;
 }
 
 export function addWatermark(params: WatermarkParams): Promise<string | null> {
   if (!webViewRef) return Promise.resolve(null);
 
-  const line1 = `${formatDate(params.dateTime)}  |  ${formatCoord(params.latitude, params.longitude)}`;
+  // Single bar rule (matches web): "1 Apr 2026 at 07:00 | 41.00921N, 29.07850E"
+  const line1 = `${formatDate(params.dateTime)} | ${formatCoord(params.latitude, params.longitude)}`;
   const line2 = params.projectName;
 
   return new Promise((resolve) => {

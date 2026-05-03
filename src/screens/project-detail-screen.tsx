@@ -30,6 +30,7 @@ const sections = [
   { key: "surveys", label: "Surveys", icon: "clipboard-outline" as const, desc: "Field surveys and data collection" },
   { key: "habitats", label: "Habitats", icon: "leaf-outline" as const, desc: "Habitat mapping and classification" },
   { key: "notes", label: "Target Notes", icon: "flag-outline" as const, desc: "Points of interest and observations" },
+  { key: "photos", label: "Photos", icon: "images-outline" as const, desc: "General site photographs for the project" },
 ];
 
 export default function ProjectDetailScreen() {
@@ -159,6 +160,7 @@ export default function ProjectDetailScreen() {
     if (key === "surveys") router.push(`/project/${id}/surveys${siteParam}`);
     if (key === "habitats") router.push(`/project/${id}/habitats${siteParam}`);
     if (key === "notes") router.push(`/project/${id}/target-notes${siteParam}`);
+    if (key === "photos") router.push(`/project/${id}/photos${siteParam}`);
   };
 
   if (loading) {

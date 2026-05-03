@@ -1,12 +1,24 @@
 import * as SQLite from "expo-sqlite";
 
 let db: SQLite.SQLiteDatabase | null = null;
+let initPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (db) return db;
-  db = await SQLite.openDatabaseAsync("dulra.db");
-  await initTables(db);
-  return db;
+  // Cache the in-flight init so concurrent callers (e.g. _layout reading
+  // app_state while another effect kicks off cacheAllData) all await the
+  // same migration pass — otherwise the second caller could grab the
+  // half-initialised handle before CREATE TABLE has finished and hit
+  // "no such table" errors.
+  if (!initPromise) {
+    initPromise = (async () => {
+      const opened = await SQLite.openDatabaseAsync("dulra.db");
+      await initTables(opened);
+      db = opened;
+      return opened;
+    })();
+  }
+  return initPromise;
 }
 
 async function tryAddColumn(database: SQLite.SQLiteDatabase, table: string, column: string, definition: string): Promise<void> {
@@ -160,6 +172,11 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       role TEXT,
       cached_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS app_state (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
   `);
 
   // ==== Column safety pass — idempotent, runs every startup ====
@@ -183,6 +200,10 @@ async function initTables(database: SQLite.SQLiteDatabase) {
   await tryAddColumn(database, "cached_target_notes", "site_id", "TEXT");
   await tryAddColumn(database, "pending_photos", "retry_count", "INTEGER DEFAULT 0");
   await tryAddColumn(database, "pending_photos", "last_error", "TEXT");
+  await tryAddColumn(database, "pending_photos", "site_id", "TEXT");
+  // tags is JSON-encoded string[] (e.g. '["site"]'). NULL means no tags.
+  await tryAddColumn(database, "pending_photos", "tags", "TEXT");
+  await tryAddColumn(database, "pending_photos", "caption", "TEXT");
   try {
     await database.runAsync(`UPDATE pending_surveys SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column not yet added on very old schema */ }
@@ -193,10 +214,28 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
 
-  if (currentVer < 6) {
+  if (currentVer < 8) {
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (6)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (8)`);
   }
+}
+
+export async function getAppState(key: string): Promise<string | null> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ value: string | null }>(
+    `SELECT value FROM app_state WHERE key = ?`,
+    key
+  );
+  return row?.value ?? null;
+}
+
+export async function setAppState(key: string, value: string): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)`,
+    key,
+    value
+  );
 }
 
 function generateId(): string {
@@ -387,14 +426,19 @@ export async function savePhotoLocally(params: {
   projectName?: string;
   surveyId?: string;
   surveyLocalId?: string;
+  siteId?: string | null;
+  tags?: string[] | null;
+  caption?: string | null;
 }): Promise<string> {
   const database = await getDatabase();
   const id = generateId();
+  const tagsJson = params.tags && params.tags.length > 0 ? JSON.stringify(params.tags) : null;
   await database.runAsync(
-    `INSERT INTO pending_photos (id, local_uri, project_id, project_name, survey_id, survey_local_id, sync_status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    `INSERT INTO pending_photos (id, local_uri, project_id, project_name, survey_id, survey_local_id, site_id, tags, caption, sync_status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
     id, params.localUri, params.projectId, params.projectName ?? null,
     params.surveyId ?? null, params.surveyLocalId ?? null,
+    params.siteId ?? null, tagsJson, params.caption ?? null,
     new Date().toISOString()
   );
   return id;
@@ -409,11 +453,14 @@ export async function getPendingPhotos(): Promise<Array<{
   project_name: string | null;
   survey_id: string | null;
   survey_local_id: string | null;
+  site_id: string | null;
+  tags: string | null;
+  caption: string | null;
   retry_count: number;
 }>> {
   const database = await getDatabase();
   return database.getAllAsync(
-    `SELECT id, local_uri, project_id, project_name, survey_id, survey_local_id, retry_count
+    `SELECT id, local_uri, project_id, project_name, survey_id, survey_local_id, site_id, tags, caption, retry_count
      FROM pending_photos WHERE sync_status = 'pending' AND retry_count < ?`,
     PHOTO_MAX_RETRIES
   );

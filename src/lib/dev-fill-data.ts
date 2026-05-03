@@ -108,8 +108,8 @@ export function generateTestReleveFormData(): {
 
   const values: Record<string, string | number> = {
     releve_area_sqm: 4,
-    survey_x_coord: 53.3498,
-    survey_y_coord: -6.2603,
+    survey_x_coord: -6.2603,
+    survey_y_coord: 53.3498,
     accuracy_m: 5,
     habitat_type: firstFossittCode,
     soil_type: "Peat",

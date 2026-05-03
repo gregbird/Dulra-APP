@@ -24,12 +24,32 @@ import HabitatPicker, { FOSSITT_LEVEL3 } from "@/components/habitat-picker";
 import SpeciesRow from "@/components/species-row";
 import { saveSurvey } from "@/lib/survey-save";
 import { getReleveDefaults } from "@/lib/releve-save";
+import { getLocation, getLastKnownLocation } from "@/lib/location";
 import { getCachedSurvey, getCachedProjects, getPendingSurveyByRemoteId, cacheSurvey, getCachedProjectSites } from "@/lib/database";
 import type { FormData } from "@/types/survey-template";
 import type { ReleveSpeciesEntry } from "@/types/releve";
 import { useDevEventStore } from "@/lib/dev-events";
 import { generateTestReleveFormData } from "@/lib/dev-fill-data";
 import { useNetworkStore } from "@/lib/network";
+
+/* ── GPS accuracy badge thresholds ──────────────────────────── */
+// CIEEM relevé plot guidance: ≤10m is acceptable for 2x2m or 4m² plots.
+// 10-50m is usable but worth flagging; >50m means the user is likely
+// indoors / under tree cover and should retry outside.
+function getAccuracyMeta(accuracy: number): {
+  label: string;
+  color: string;
+  icon: "checkmark-circle" | "alert-circle" | "warning";
+} {
+  const rounded = Math.round(accuracy);
+  if (accuracy <= 10) {
+    return { label: `±${rounded}m · Excellent`, color: colors.status.onTrack, icon: "checkmark-circle" };
+  }
+  if (accuracy <= 50) {
+    return { label: `±${rounded}m · OK`, color: colors.status.atRisk, icon: "alert-circle" };
+  }
+  return { label: `±${rounded}m · Poor`, color: colors.status.overdue, icon: "warning" };
+}
 
 /* ── Main screen ────────────────────────────────────────────── */
 
@@ -59,6 +79,7 @@ export default function ReleveSurveyFormScreen() {
     }
   };
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(["basic"]));
+  const [gpsCapturing, setGpsCapturing] = useState(false);
   const [activeSelect, setActiveSelect] = useState<{ sectionId: string; field: FieldDef } | null>(null);
   const [showHabitatPicker, setShowHabitatPicker] = useState(false);
   const photosRef = useRef<SurveyPhotosHandle>(null);
@@ -121,7 +142,27 @@ export default function ReleveSurveyFormScreen() {
 
   const init = useCallback(async () => {
     try {
-      const online = useNetworkStore.getState().isOnline;
+      // Active NetInfo probe instead of trusting the Zustand store: the store
+      // initialises pessimistic (`false`) and only flips after `startNetworkListener`'s
+      // async NetInfo.fetch resolves. On a reload while we're already on this
+      // screen, init() can race that probe and end up reading `isOnline = false`,
+      // dropping into the cache fallback. The cache holds surveys.form_data
+      // (jsonb) which web doesn't update when it edits releve_surveys columns
+      // directly — so freshly-set web coordinates would never appear here.
+      let online = useNetworkStore.getState().isOnline;
+      if (!online) {
+        try {
+          const NetInfo = (await import("@react-native-community/netinfo")).default;
+          const state = await NetInfo.fetch();
+          const probedOnline =
+            state.isInternetReachable === true ||
+            (state.isInternetReachable === null && state.isConnected === true);
+          if (probedOnline) {
+            online = true;
+            useNetworkStore.getState().setOnline(true);
+          }
+        } catch { /* probe failed — keep pessimistic value */ }
+      }
       // Session from SecureStore — safe offline.
       try {
         const { supabase } = await import("@/lib/supabase");
@@ -244,6 +285,99 @@ export default function ReleveSurveyFormScreen() {
   useEffect(() => {
     init().finally(() => setLoading(false));
   }, [init]);
+
+  const writeLocationToForm = useCallback((loc: { lat: number; lng: number; accuracy: number | null }) => {
+    setFormData((prev) => ({
+      ...prev,
+      location: {
+        survey_x_coord: loc.lng,
+        survey_y_coord: loc.lat,
+        accuracy_m: loc.accuracy,
+      },
+    }));
+  }, []);
+
+  // Manual refresh: explicit user action, always overrides whatever's currently
+  // in the form (including values the user just typed). Re-uses the same
+  // capturing indicator as the auto-fill on mount.
+  const refreshGps = useCallback(async () => {
+    setGpsCapturing(true);
+    try {
+      const fresh = await getLocation({ maxAgeMs: 0 });
+      if (fresh) {
+        writeLocationToForm(fresh);
+      } else {
+        Alert.alert(
+          "Location Unavailable",
+          "Could not capture GPS. Check that location is enabled in Settings and try again outdoors.",
+        );
+      }
+    } finally {
+      setGpsCapturing(false);
+    }
+  }, [writeLocationToForm]);
+
+  // Auto-capture GPS for new relevés only — edit mode preserves whatever the
+  // user (or web) typed previously. Two-stage so the user sees something fast:
+  //   (1) getLastKnownLocation: instant from OS cache, no GPS fix taken.
+  //   (2) getLocation: real GPS fix (1-3s) for better accuracy.
+  // Either stage backs off if the user has already typed coordinates.
+  useEffect(() => {
+    if (!isNew || loading) return;
+    let cancelled = false;
+
+    const fillIfEmpty = (loc: { lat: number; lng: number; accuracy: number | null }) => {
+      setFormData((prev) => {
+        const cur = (prev.location ?? {}) as Record<string, string | number | null>;
+        if (cur.survey_x_coord != null || cur.survey_y_coord != null) return prev;
+        return {
+          ...prev,
+          location: {
+            survey_x_coord: loc.lng,
+            survey_y_coord: loc.lat,
+            accuracy_m: loc.accuracy,
+          },
+        };
+      });
+    };
+
+    setGpsCapturing(true);
+    (async () => {
+      const lastKnown = await getLastKnownLocation();
+      if (cancelled) return;
+      if (lastKnown) fillIfEmpty(lastKnown);
+
+      const fresh = await getLocation({ maxAgeMs: 0 });
+      if (cancelled) return;
+      if (fresh) {
+        // Override the lastKnown value with the higher-accuracy fix, but
+        // still respect a user who's already typed something between calls.
+        setFormData((prev) => {
+          const cur = (prev.location ?? {}) as Record<string, string | number | null>;
+          const fromLastKnown =
+            lastKnown != null &&
+            cur.survey_x_coord === lastKnown.lng &&
+            cur.survey_y_coord === lastKnown.lat;
+          const isEmpty = cur.survey_x_coord == null && cur.survey_y_coord == null;
+          if (!isEmpty && !fromLastKnown) return prev;
+          return {
+            ...prev,
+            location: {
+              survey_x_coord: fresh.lng,
+              survey_y_coord: fresh.lat,
+              accuracy_m: fresh.accuracy,
+            },
+          };
+        });
+      }
+      if (!cancelled) setGpsCapturing(false);
+    })();
+
+    return () => {
+      cancelled = true;
+      setGpsCapturing(false);
+    };
+  }, [isNew, loading]);
 
   const fillToken = useDevEventStore((s) => s.fillToken);
   const clearFillToken = useDevEventStore((s) => s.clearFillToken);
@@ -399,14 +533,54 @@ export default function ReleveSurveyFormScreen() {
 
           {RELEVE_SECTIONS.map((section) => {
             const isExpanded = expandedSections.has(section.id);
+            const isLocationSection = section.id === "location";
+            const accuracyVal = isLocationSection
+              ? (formData.location?.accuracy_m as number | null | undefined)
+              : null;
+            const accuracyMeta = accuracyVal != null && Number.isFinite(accuracyVal)
+              ? getAccuracyMeta(accuracyVal)
+              : null;
             return (
               <View key={section.id} style={s.section}>
                 <TouchableOpacity style={s.sectionHeader} activeOpacity={0.7} onPress={() => toggleSection(section.id)}>
-                  <Text style={s.sectionTitle}>{section.title}</Text>
+                  <View style={s.sectionTitleRow}>
+                    <Text style={s.sectionTitle}>{section.title}</Text>
+                    {isLocationSection && gpsCapturing && (
+                      <View style={s.gpsStatus}>
+                        <ActivityIndicator size="small" color={colors.primary.DEFAULT} />
+                        <Text style={s.gpsStatusText}>Capturing GPS...</Text>
+                      </View>
+                    )}
+                    {isLocationSection && !gpsCapturing && accuracyMeta && (
+                      <View style={[s.accuracyBadge, { backgroundColor: accuracyMeta.color + "1A" }]}>
+                        <Ionicons name={accuracyMeta.icon} size={14} color={accuracyMeta.color} />
+                        <Text style={[s.accuracyBadgeText, { color: accuracyMeta.color }]}>
+                          {accuracyMeta.label}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
                   <Ionicons name={isExpanded ? "chevron-up" : "chevron-down"} size={22} color={colors.text.muted} />
                 </TouchableOpacity>
                 {isExpanded && (
                   <View style={s.sectionBody}>
+                    {isLocationSection && (
+                      <TouchableOpacity
+                        style={[s.gpsRefreshBtn, gpsCapturing && s.gpsRefreshBtnDisabled]}
+                        activeOpacity={0.7}
+                        onPress={refreshGps}
+                        disabled={gpsCapturing}
+                      >
+                        {gpsCapturing ? (
+                          <ActivityIndicator size="small" color={colors.primary.DEFAULT} />
+                        ) : (
+                          <Ionicons name="refresh" size={18} color={colors.primary.DEFAULT} />
+                        )}
+                        <Text style={s.gpsRefreshBtnText}>
+                          {gpsCapturing ? "Capturing..." : "Refresh GPS"}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                     {section.fields.map((field) => {
                       const currentVal = formData[section.id]?.[field.key];
                       return (
@@ -538,7 +712,24 @@ const s = StyleSheet.create({
   scrollContent: { padding: 16, paddingBottom: 140 },
   section: { backgroundColor: colors.background.card, borderRadius: 14, marginBottom: 12, borderWidth: 1, borderColor: "#E5E7EB", overflow: "hidden" },
   sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 18, minHeight: 60 },
+  sectionTitleRow: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1, flexWrap: "wrap" },
   sectionTitle: { fontSize: 17, fontWeight: "600", color: colors.text.heading },
+  gpsStatus: { flexDirection: "row", alignItems: "center", gap: 6 },
+  gpsStatusText: { fontSize: 13, color: colors.text.muted, fontWeight: "500" },
+  accuracyBadge: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+  },
+  accuracyBadgeText: { fontSize: 12, fontWeight: "600" },
+  gpsRefreshBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    paddingHorizontal: 14, paddingVertical: 12,
+    borderRadius: 10, borderWidth: 1.5, borderColor: colors.primary.DEFAULT,
+    backgroundColor: colors.primary.DEFAULT + "08",
+    marginBottom: 14, minHeight: 48,
+  },
+  gpsRefreshBtnDisabled: { opacity: 0.6 },
+  gpsRefreshBtnText: { fontSize: 15, fontWeight: "600", color: colors.primary.DEFAULT },
   sectionBody: { paddingHorizontal: 18, paddingBottom: 18, borderTopWidth: 1, borderTopColor: "#E5E7EB", paddingTop: 14 },
   fieldWrap: { marginBottom: 14 },
   fieldLabel: { fontSize: 14, fontWeight: "500", color: colors.text.body, marginBottom: 6 },

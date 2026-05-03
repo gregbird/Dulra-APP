@@ -7,9 +7,13 @@ import { colors } from "@/constants/colors";
 import DevTool from "@/components/dev-tool";
 import WatermarkEngine from "@/components/watermark-engine";
 import SyncIndicator from "@/components/sync-indicator";
+import LocationPermissionModal from "@/components/location-permission-modal";
 import { startNetworkListener, useNetworkStore } from "@/lib/network";
 import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
 import { cacheAllData } from "@/lib/cache-refresh";
+import { getAppState, setAppState } from "@/lib/database";
+
+const LOCATION_PROMPT_FLAG = "location_prompt_shown";
 
 // Don't hammer the network every time the user briefly leaves the app —
 // only auto-refresh if they've been away this long. Short app switches
@@ -20,6 +24,7 @@ export default function RootLayout() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const [dataCached, setDataCached] = useState(false);
+  const [locationPromptVisible, setLocationPromptVisible] = useState(false);
   const router = useRouter();
   const segments = useSegments();
 
@@ -111,6 +116,26 @@ export default function RootLayout() {
     });
   }, [session, loading, dataCached, isOnline]);
 
+  // First-launch location prompt: shown once per device after the user is
+  // signed in and inside the app shell. We persist a flag in app_state so
+  // dismissal ("Maybe later" or any explicit close) sticks across restarts —
+  // the user can always re-trigger from the Settings screen.
+  useEffect(() => {
+    if (!session || loading) return;
+    const inAuthGroup = segments[0] === "(auth)";
+    if (inAuthGroup) return;
+    let cancelled = false;
+    getAppState(LOCATION_PROMPT_FLAG).then((shown) => {
+      if (!cancelled && !shown) setLocationPromptVisible(true);
+    });
+    return () => { cancelled = true; };
+  }, [session, loading, segments]);
+
+  const handleLocationPromptClose = () => {
+    setLocationPromptVisible(false);
+    setAppState(LOCATION_PROMPT_FLAG, "1").catch(() => { /* non-fatal */ });
+  };
+
   if (loading) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.white }}>
@@ -175,6 +200,10 @@ export default function RootLayout() {
         />
       </Stack>
       <WatermarkEngine />
+      <LocationPermissionModal
+        visible={locationPromptVisible}
+        onClose={handleLocationPromptClose}
+      />
       {__DEV__ && <DevTool />}
     </View>
   );

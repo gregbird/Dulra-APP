@@ -7,12 +7,15 @@ import {
   ActivityIndicator,
   Dimensions,
   TouchableOpacity,
+  Alert,
 } from "react-native";
 import { useLocalSearchParams, useRouter, Stack } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
-import { getCachedTargetNote } from "@/lib/database";
+import { getCachedTargetNote, cacheTargetNote } from "@/lib/database";
+import { useNetworkStore } from "@/lib/network";
+import { getLocation } from "@/lib/location";
 import { categoryLabels } from "@/types/habitat";
 import PhotoViewer from "@/components/photo-viewer";
 
@@ -38,6 +41,80 @@ export default function TargetNoteDetailScreen() {
   const router = useRouter();
   const [note, setNote] = useState<NoteDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  const [updatingLocation, setUpdatingLocation] = useState(false);
+  const isOnline = useNetworkStore((s) => s.isOnline);
+
+  const handleUpdateLocation = () => {
+    if (!note) return;
+    if (!isOnline) {
+      Alert.alert(
+        "Internet Required",
+        "Connect to the internet to update this target note's location.",
+      );
+      return;
+    }
+    Alert.alert(
+      "Update Location",
+      "Replace this target note's location with your current GPS reading?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Update",
+          onPress: async () => {
+            setUpdatingLocation(true);
+            try {
+              const fresh = await getLocation({ maxAgeMs: 0 });
+              if (!fresh) {
+                Alert.alert(
+                  "Location Unavailable",
+                  "Could not capture GPS. Check that location is enabled in Settings and try again outdoors.",
+                );
+                return;
+              }
+              const wkt = `SRID=4326;POINT(${fresh.lng} ${fresh.lat})`;
+              const { error } = await supabase
+                .from("target_notes")
+                .update({ location: wkt })
+                .eq("id", note.id);
+              if (error) throw error;
+
+              const newLocationText = `POINT(${fresh.lng} ${fresh.lat})`;
+              setNote((prev) => (prev ? { ...prev, location_text: newLocationText } : prev));
+
+              // Refresh the cache row so an offline reopen still shows the
+              // new location. Pull the existing cache (SELECT * — site_id is
+              // returned at runtime even though the typed shape omits it) to
+              // preserve fields the detail screen doesn't track.
+              const cached = await getCachedTargetNote(note.id);
+              const existingSiteId =
+                cached && typeof (cached as Record<string, unknown>).site_id === "string"
+                  ? ((cached as Record<string, unknown>).site_id as string)
+                  : null;
+              await cacheTargetNote({
+                id: note.id,
+                projectId: note.project_id,
+                category: note.category,
+                title: note.title,
+                description: note.description,
+                priority: note.priority,
+                isVerified: note.is_verified,
+                locationText: newLocationText,
+                photos: note.photos ?? null,
+                siteId: existingSiteId,
+              });
+            } catch {
+              Alert.alert(
+                "Update Failed",
+                "Could not save the new location to the server. Please try again.",
+              );
+            } finally {
+              setUpdatingLocation(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   useEffect(() => {
     const fetchNote = async () => {
@@ -149,22 +226,49 @@ export default function TargetNoteDetailScreen() {
           </View>
         )}
 
-        {lat && lng && (
-          <View style={styles.card}>
-            <Text style={styles.sectionLabel}>Location</Text>
+        <View style={styles.card}>
+          <Text style={styles.sectionLabel}>Location</Text>
+          {lat && lng ? (
             <View style={styles.coordRow}>
               <View style={styles.coordIcon}>
                 <Ionicons name="location" size={20} color={colors.primary.DEFAULT} />
               </View>
-              <View>
+              <View style={{ flex: 1 }}>
                 <Text style={styles.coordLabel}>Coordinates</Text>
                 <Text style={styles.coordText}>
                   {parseFloat(lat).toFixed(6)}, {parseFloat(lng).toFixed(6)}
                 </Text>
               </View>
             </View>
-          </View>
-        )}
+          ) : (
+            <Text style={styles.noLocationText}>No location recorded yet.</Text>
+          )}
+          <TouchableOpacity
+            style={[
+              styles.updateLocationBtn,
+              (!isOnline || updatingLocation) && styles.updateLocationBtnDisabled,
+            ]}
+            activeOpacity={0.7}
+            onPress={handleUpdateLocation}
+            disabled={updatingLocation}
+          >
+            {updatingLocation ? (
+              <ActivityIndicator size="small" color={colors.primary.DEFAULT} />
+            ) : (
+              <Ionicons name="refresh" size={18} color={colors.primary.DEFAULT} />
+            )}
+            <Text style={styles.updateLocationBtnText}>
+              {updatingLocation
+                ? "Updating..."
+                : lat && lng
+                ? "Update Location"
+                : "Capture Location"}
+            </Text>
+          </TouchableOpacity>
+          {!isOnline && (
+            <Text style={styles.offlineHint}>Internet required to update location.</Text>
+          )}
+        </View>
 
         {note.photos && note.photos.length > 0 && (
           <View style={styles.card}>
@@ -207,4 +311,15 @@ const styles = StyleSheet.create({
   },
   coordLabel: { fontSize: 13, color: colors.text.muted, marginBottom: 2 },
   coordText: { fontSize: 16, fontWeight: "600", color: colors.text.heading },
+  noLocationText: { fontSize: 15, color: colors.text.muted, fontStyle: "italic" },
+  updateLocationBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
+    marginTop: 14, paddingVertical: 12, paddingHorizontal: 14,
+    borderRadius: 10, borderWidth: 1.5, borderColor: colors.primary.DEFAULT,
+    backgroundColor: colors.primary.DEFAULT + "08",
+    minHeight: 48,
+  },
+  updateLocationBtnDisabled: { opacity: 0.55 },
+  updateLocationBtnText: { fontSize: 15, fontWeight: "600", color: colors.primary.DEFAULT },
+  offlineHint: { fontSize: 13, color: colors.status.atRisk, marginTop: 8, textAlign: "center" },
 });

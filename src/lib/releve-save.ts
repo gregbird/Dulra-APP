@@ -30,6 +30,21 @@ export function buildFormDataFromReleve(
 }
 
 /**
+ * Build a PostGIS POINT WKT in `SRID=4326;POINT(lng lat)` form when both
+ * coords are present. Mirrors web's queries/releve-surveys.ts:131-132 — the
+ * geometry column is the source of truth for spatial queries (Step 5 maps
+ * tab) and a populated `location` is also the marker that tells migration
+ * tooling "this row was written with the correct convention".
+ */
+function buildLocationWkt(fields: Partial<ReleveData>): string | null {
+  const lng = fields.survey_x_coord;
+  const lat = fields.survey_y_coord;
+  if (lng == null || lat == null) return null;
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  return `SRID=4326;POINT(${lng} ${lat})`;
+}
+
+/**
  * Insert a record into the releve_surveys table.
  * Called after the parent survey row is created in the surveys table.
  *
@@ -60,6 +75,9 @@ export async function insertReleveSurvey(params: {
     ...releveFields,
   };
 
+  const locationWkt = buildLocationWkt(releveFields);
+  if (locationWkt) row.location = locationWkt;
+
   const { data, error } = await supabase
     .from("releve_surveys")
     .insert(row)
@@ -73,8 +91,19 @@ export async function insertReleveSurvey(params: {
 
 /**
  * Atomic upsert of the releve_surveys row for an existing survey.
- * Uses Supabase native upsert on survey_id (unique constraint required)
- * so we never leave the table in an empty state between DELETE and INSERT.
+ *
+ * Native PostgREST upsert with onConflict requires a UNIQUE constraint on
+ * the target column. `releve_surveys.survey_id` is currently a plain FK
+ * (no unique index), so `.upsert(..., { onConflict: "survey_id" })` fails
+ * with "no unique or exclusion constraint matching the ON CONFLICT
+ * specification" the moment a row for that survey already exists.
+ *
+ * Workaround: manual SELECT → UPDATE if exists, INSERT otherwise. Not
+ * race-safe across simultaneous writers, but the mobile sync queue runs
+ * one survey at a time so that's acceptable.
+ *
+ * TODO(web): once releve_surveys.survey_id gets a UNIQUE constraint,
+ * collapse this back into a single .upsert() call.
  */
 export async function upsertReleveSurvey(params: {
   projectId: string;
@@ -99,20 +128,47 @@ export async function upsertReleveSurvey(params: {
     ...releveFields,
   };
 
-  const { data, error } = await supabase
-    .from("releve_surveys")
-    .upsert(row, { onConflict: "survey_id" })
-    .select("id")
-    .single();
+  const locationWkt = buildLocationWkt(releveFields);
+  if (locationWkt) row.location = locationWkt;
 
-  if (error) throw new Error(`releve_surveys upsert failed: ${error.message}`);
-  if (!data) throw new Error("releve_surveys upsert returned no row");
+  const { data: existing, error: selectError } = await supabase
+    .from("releve_surveys")
+    .select("id")
+    .eq("survey_id", surveyId)
+    .maybeSingle();
+
+  if (selectError) {
+    throw new Error(`releve_surveys lookup failed: ${selectError.message}`);
+  }
+
+  let releveId: string;
+  if (existing?.id) {
+    const { error: updateError } = await supabase
+      .from("releve_surveys")
+      .update(row)
+      .eq("id", existing.id);
+    if (updateError) {
+      throw new Error(`releve_surveys update failed: ${updateError.message}`);
+    }
+    releveId = existing.id;
+  } else {
+    const { data: inserted, error: insertError } = await supabase
+      .from("releve_surveys")
+      .insert(row)
+      .select("id")
+      .single();
+    if (insertError) {
+      throw new Error(`releve_surveys insert failed: ${insertError.message}`);
+    }
+    if (!inserted) throw new Error("releve_surveys insert returned no row");
+    releveId = inserted.id;
+  }
 
   // Clear species for this releve so the subsequent insertReleveSpecies call
   // can re-populate without leaving stale rows from a previous edit.
-  await supabase.from("releve_species").delete().eq("releve_id", data.id);
+  await supabase.from("releve_species").delete().eq("releve_id", releveId);
 
-  return data.id;
+  return releveId;
 }
 
 /**

@@ -20,7 +20,7 @@ import { syncPendingData, refreshPendingCount } from "@/lib/sync-service";
 import { cacheAllData } from "@/lib/cache-refresh";
 import {
   createOneSurvey, createTestHabitat, createTestTargetNote,
-  inspectPending, dropAllConflicts,
+  inspectPending, dropAllConflicts, resetLocationPrompt,
 } from "@/lib/dev-actions";
 import { surveyTypeLabels } from "@/types/survey";
 import { devToolStyles as s } from "@/components/dev-tool-styles";
@@ -169,6 +169,15 @@ export default function DevTool() {
     setMenuVisible(false);
     const report = await inspectPending();
     Alert.alert("Pending Queue", report);
+  };
+
+  const handleResetLocationPrompt = async () => {
+    setMenuVisible(false);
+    await resetLocationPrompt();
+    Alert.alert(
+      "Location Prompt Reset",
+      "First-launch modal will appear next time you return to the home tabs. You may need to navigate away and back for it to fire.",
+    );
   };
 
   const handleDropConflicts = async () => {
@@ -377,6 +386,13 @@ export default function DevTool() {
                 activeOpacity={0.7}
               >
                 <Text style={[s.menuItemText, s.menuItemTextSecondary]}>Drop Conflicted Items</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.menuItem, s.menuItemSecondary]}
+                onPress={handleResetLocationPrompt}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.menuItemText, s.menuItemTextSecondary]}>Reset Location Prompt</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[s.menuItem, s.menuItemSecondary, devForcedOffline && s.menuItemWarn]}

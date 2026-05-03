@@ -13,6 +13,8 @@ import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedProfiles } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
+import { useLocation } from "@/hooks/use-location";
+import LocationPermissionModal from "@/components/location-permission-modal";
 import type { Profile } from "@/types/project";
 
 const roleLabels: Record<string, { label: string; color: string }> = {
@@ -25,9 +27,32 @@ const roleLabels: Record<string, { label: string; color: string }> = {
   client: { label: "Client", color: colors.role.client },
 };
 
+const locationStatusMeta: Record<
+  "granted" | "denied" | "undetermined",
+  { label: string; color: string; iconColor: string }
+> = {
+  granted: {
+    label: "Granted",
+    color: colors.status.onTrack,
+    iconColor: colors.status.onTrack,
+  },
+  denied: {
+    label: "Denied",
+    color: colors.status.atRisk,
+    iconColor: colors.status.atRisk,
+  },
+  undetermined: {
+    label: "Not asked",
+    color: colors.text.muted,
+    iconColor: colors.text.muted,
+  },
+};
+
 export default function SettingsScreen() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [locationModalVisible, setLocationModalVisible] = useState(false);
+  const { status: locationStatus } = useLocation();
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -126,6 +151,40 @@ export default function SettingsScreen() {
       </View>
 
       <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Permissions</Text>
+
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => setLocationModalVisible(true)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.menuLeft}>
+            <Ionicons
+              name="location-outline"
+              size={22}
+              color={locationStatusMeta[locationStatus].iconColor}
+            />
+            <Text style={styles.menuText}>Location</Text>
+          </View>
+          <View style={styles.menuRight}>
+            <Text
+              style={[
+                styles.statusText,
+                { color: locationStatusMeta[locationStatus].color },
+              ]}
+            >
+              {locationStatusMeta[locationStatus].label}
+            </Text>
+            <Ionicons
+              name="chevron-forward"
+              size={18}
+              color={colors.text.muted}
+            />
+          </View>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.section}>
         <Text style={styles.sectionTitle}>Account</Text>
 
         <TouchableOpacity
@@ -148,6 +207,11 @@ export default function SettingsScreen() {
       </View>
 
       <Text style={styles.version}>Dulra Mobile v1.0.0</Text>
+
+      <LocationPermissionModal
+        visible={locationModalVisible}
+        onClose={() => setLocationModalVisible(false)}
+      />
     </ScrollView>
   );
 }
@@ -244,9 +308,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
   },
+  menuRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
   menuText: {
     fontSize: 16,
     fontWeight: "500",
+    color: colors.text.heading,
+  },
+  statusText: {
+    fontSize: 14,
+    fontWeight: "600",
   },
   version: {
     textAlign: "center",

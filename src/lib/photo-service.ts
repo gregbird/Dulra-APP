@@ -1,6 +1,6 @@
-import * as Location from "expo-location";
 import { supabase } from "@/lib/supabase";
 import { addWatermark } from "@/lib/watermark";
+import { getLocation } from "@/lib/location";
 
 interface UploadPhotoParams {
   localUri: string;
@@ -9,6 +9,11 @@ interface UploadPhotoParams {
   surveyId?: string;
   habitatPolygonId?: string;
   targetNoteId?: string;
+  siteId?: string | null;
+  /** Tag list (e.g. ['site']) — landed in photos.tags as text[]. */
+  tags?: string[] | null;
+  /** Optional user-entered caption. NULL means no caption (web shows fallback). */
+  caption?: string | null;
 }
 
 interface UploadResult {
@@ -16,23 +21,7 @@ interface UploadResult {
   photoId: string;
 }
 
-let cachedLocation: { lat: number; lng: number; timestamp: number } | null = null;
-const LOCATION_CACHE_MS = 60_000;
-
-export async function getLocation(): Promise<{ lat: number; lng: number } | null> {
-  if (cachedLocation && Date.now() - cachedLocation.timestamp < LOCATION_CACHE_MS) {
-    return { lat: cachedLocation.lat, lng: cachedLocation.lng };
-  }
-  const { status } = await Location.requestForegroundPermissionsAsync();
-  if (status !== "granted") return null;
-  try {
-    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-    cachedLocation = { lat: loc.coords.latitude, lng: loc.coords.longitude, timestamp: Date.now() };
-    return { lat: cachedLocation.lat, lng: cachedLocation.lng };
-  } catch {
-    return null;
-  }
-}
+const PHOTO_LOCATION_MAX_AGE_MS = 60_000;
 
 async function uploadFile(uri: string, storagePath: string): Promise<boolean> {
   const response = await fetch(uri);
@@ -57,7 +46,7 @@ async function uploadBase64(base64: string, storagePath: string): Promise<boolea
 }
 
 export async function uploadPhoto(params: UploadPhotoParams): Promise<UploadResult | null> {
-  const { localUri, projectId, projectName, surveyId, habitatPolygonId, targetNoteId } = params;
+  const { localUri, projectId, projectName, surveyId, habitatPolygonId, targetNoteId, siteId, tags, caption } = params;
 
   // getSession reads cached session without a network round-trip; getUser validates
   // server-side on every call which adds latency and fails offline during bulk photo sync.
@@ -65,13 +54,13 @@ export async function uploadPhoto(params: UploadPhotoParams): Promise<UploadResu
   const userId = session?.user?.id;
   if (!userId) return null;
 
-  const location = await getLocation();
+  const location = await getLocation({ maxAgeMs: PHOTO_LOCATION_MAX_AGE_MS });
   const timestamp = Date.now();
   const fileName = `${timestamp}-photo.jpg`;
   const watermarkedFileName = `${timestamp}-photo-watermarked.jpg`;
 
   let context = "general";
-  let subPath = "mobile";
+  let subPath = siteId ?? "mobile";
   if (surveyId) { context = "survey"; subPath = surveyId; }
   else if (habitatPolygonId) { context = "habitat"; subPath = "mobile"; }
   else if (targetNoteId) { context = "target-note"; subPath = "mobile"; }
@@ -116,20 +105,27 @@ export async function uploadPhoto(params: UploadPhotoParams): Promise<UploadResu
   const { data: urlData } = supabase.storage.from("project-photos").getPublicUrl(storagePath);
   const locationPoint = location ? `SRID=4326;POINT(${location.lng} ${location.lat})` : null;
 
+  const insertRow: Record<string, unknown> = {
+    project_id: projectId,
+    survey_id: surveyId ?? null,
+    habitat_polygon_id: habitatPolygonId ?? null,
+    target_note_id: targetNoteId ?? null,
+    storage_path: storagePath,
+    watermarked_path: watermarkedPath,
+    location: locationPoint,
+    taken_at: new Date().toISOString(),
+    caption: caption ?? null,
+    created_by: userId,
+  };
+  if (tags && tags.length > 0) insertRow.tags = tags;
+  // site_id only attached if explicitly provided — column is nullable and
+  // single-site projects auto-resolve at the caller (no value here means
+  // "leave NULL" rather than "guess").
+  if (siteId) insertRow.site_id = siteId;
+
   const { data: photoRow, error: insertError } = await supabase
     .from("photos")
-    .insert({
-      project_id: projectId,
-      survey_id: surveyId ?? null,
-      habitat_polygon_id: habitatPolygonId ?? null,
-      target_note_id: targetNoteId ?? null,
-      storage_path: storagePath,
-      watermarked_path: watermarkedPath,
-      location: locationPoint,
-      taken_at: new Date().toISOString(),
-      caption: fileName,
-      created_by: userId,
-    })
+    .insert(insertRow)
     .select("id")
     .single();
 

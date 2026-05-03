@@ -4,7 +4,9 @@ import {
   cacheHabitat, cacheTargetNote,
   getAllPendingSurveys, getAllPendingPhotos,
   dropConflictedSurveys, dropConflictedPhotos,
+  getDatabase,
 } from "@/lib/database";
+import { clearLocationCache } from "@/lib/location";
 import { saveSurvey } from "@/lib/survey-save";
 import { getReleveDefaults } from "@/lib/releve-save";
 import { generateTestFormData, generateTestReleveFormData } from "@/lib/dev-fill-data";
@@ -208,4 +210,15 @@ export async function dropAllConflicts(): Promise<{ surveys: number; photos: num
     dropConflictedPhotos(),
   ]);
   return { surveys, photos };
+}
+
+/**
+ * Reset the first-launch location prompt so the modal fires again on the
+ * next render. Also clears the in-memory location cache so a fresh GPS fix
+ * is taken next time getLocation() is called. Useful for QA test runs.
+ */
+export async function resetLocationPrompt(): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(`DELETE FROM app_state WHERE key = ?`, "location_prompt_shown");
+  clearLocationCache();
 }

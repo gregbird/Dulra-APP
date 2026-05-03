@@ -68,8 +68,8 @@ export const RELEVE_SECTIONS: SectionDef[] = [
     id: "location",
     title: "Location",
     fields: [
-      { key: "survey_x_coord", label: "X Coordinate (Lat)", type: "number" },
-      { key: "survey_y_coord", label: "Y Coordinate (Lng)", type: "number" },
+      { key: "survey_x_coord", label: "Longitude (X)", type: "number" },
+      { key: "survey_y_coord", label: "Latitude (Y)", type: "number" },
       { key: "accuracy_m", label: "Accuracy", type: "number", unit: "m" },
     ],
   },
