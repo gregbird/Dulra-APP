@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -13,10 +13,12 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import SurveyTypePicker from "@/components/survey-type-picker";
+import SitePicker from "@/components/site-picker";
 import { cacheSurvey, getCachedSurveys, getCachedProjectSites } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
 import type { Survey } from "@/types/survey";
 import type { SurveyTemplate } from "@/types/survey-template";
+import type { ProjectSite } from "@/types/project";
 import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
 
 const statusColors: Record<string, string> = {
@@ -25,19 +27,48 @@ const statusColors: Record<string, string> = {
 };
 
 export default function SurveysListScreen() {
-  const { id, siteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
+  const { id, siteId: urlSiteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
   const router = useRouter();
   const [surveys, setSurveys] = useState<Survey[]>([]);
-  const [sitesMap, setSitesMap] = useState<Map<string, string>>(new Map());
+  const [sites, setSites] = useState<ProjectSite[]>([]);
+  const [sitesLoaded, setSitesLoaded] = useState(false);
+  const [selectedSiteId, setSelectedSiteId] = useState<string | null>(urlSiteId ?? null);
   const [filter, setFilter] = useState<"active" | "completed">("active");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
 
+  // Mirrors web (field-survey-step): single-site projects auto-pick the only
+  // site; multi-site projects must have an explicit selection before the FAB
+  // becomes available, otherwise surveys would be created with site_id=null
+  // and disappear from any site-filtered view.
+  const effectiveSiteId = useMemo(() => {
+    if (sites.length === 1) return sites[0].id;
+    return selectedSiteId;
+  }, [sites, selectedSiteId]);
+
+  const isMultiSite = sites.length > 1;
+  const requiresSiteSelection = !sitesLoaded || (isMultiSite && !selectedSiteId);
+
+  const sitesMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const s of sites) map.set(s.id, s.site_code);
+    return map;
+  }, [sites]);
+
+  useEffect(() => {
+    if (!id) return;
+    (async () => {
+      const cached = await getCachedProjectSites(id);
+      setSites(cached as ProjectSite[]);
+      setSitesLoaded(true);
+    })();
+  }, [id]);
+
   const loadSurveysFromCache = useCallback(async () => {
     if (!id) return;
     let cached = await getCachedSurveys(id);
-    if (siteId) cached = cached.filter((c) => c.site_id === siteId);
+    if (effectiveSiteId) cached = cached.filter((c) => c.site_id === effectiveSiteId);
     if (cached.length > 0) {
       setSurveys(cached.map((c) => ({
         ...c, surveyor_id: null, start_time: null, end_time: null,
@@ -47,7 +78,7 @@ export default function SurveysListScreen() {
     } else {
       setSurveys([]);
     }
-  }, [id, siteId]);
+  }, [id, effectiveSiteId]);
 
   const fetchSurveys = useCallback(async () => {
     if (!id) return;
@@ -61,7 +92,7 @@ export default function SurveysListScreen() {
         .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, weather, form_data, created_at, updated_at, site_id")
         .eq("project_id", id)
         .order("survey_date", { ascending: false });
-      if (siteId) query = query.eq("site_id", siteId);
+      if (effectiveSiteId) query = query.eq("site_id", effectiveSiteId);
       const { data, error } = await query;
       if (error) throw error;
       if (data) {
@@ -80,21 +111,11 @@ export default function SurveysListScreen() {
     } catch {
       await loadSurveysFromCache();
     }
-  }, [id, siteId, loadSurveysFromCache]);
+  }, [id, effectiveSiteId, loadSurveysFromCache]);
 
   useEffect(() => {
     fetchSurveys().finally(() => setLoading(false));
   }, [fetchSurveys]);
-
-  useEffect(() => {
-    if (!id || siteId) return;
-    (async () => {
-      const sites = await getCachedProjectSites(id);
-      const map = new Map<string, string>();
-      for (const s of sites) map.set(s.id, s.site_code);
-      setSitesMap(map);
-    })();
-  }, [id, siteId]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -111,7 +132,7 @@ export default function SurveysListScreen() {
 
   const renderSurvey = ({ item }: { item: Survey }) => {
     const sc = statusColors[item.status] ?? colors.text.muted;
-    const siteLabel = !siteId && item.site_id ? sitesMap.get(item.site_id) : null;
+    const siteLabel = !effectiveSiteId && item.site_id ? sitesMap.get(item.site_id) : null;
     return (
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => {
         if (item.survey_type === "releve_survey") {
@@ -155,6 +176,21 @@ export default function SurveysListScreen() {
     <>
       <Stack.Screen options={{ title: "Surveys" }} />
       <View style={styles.container}>
+        {isMultiSite && (
+          <View style={styles.sitePickerWrap}>
+            <SitePicker
+              sites={sites}
+              selectedSiteId={selectedSiteId}
+              onSelect={setSelectedSiteId}
+            />
+          </View>
+        )}
+        {requiresSiteSelection && sitesLoaded && (
+          <View style={styles.warningBanner}>
+            <Ionicons name="alert-circle-outline" size={18} color={colors.status.atRisk} />
+            <Text style={styles.warningText}>Select a site first to schedule surveys.</Text>
+          </View>
+        )}
         <View style={styles.filterRow}>
           <TouchableOpacity
             style={[styles.filterChip, filter === "active" && styles.filterActive]}
@@ -194,7 +230,7 @@ export default function SurveysListScreen() {
           onClose={() => setPickerVisible(false)}
           onSelect={(template: SurveyTemplate) => {
             setPickerVisible(false);
-            const siteParam = siteId ? `&siteId=${siteId}` : "";
+            const siteParam = effectiveSiteId ? `&siteId=${effectiveSiteId}` : "";
             if (template.survey_type === "releve_survey") {
               router.push(`/releve-survey/new?projectId=${id}${siteParam}`);
             } else {
@@ -203,7 +239,12 @@ export default function SurveysListScreen() {
           }}
         />
 
-        <TouchableOpacity style={styles.fab} activeOpacity={0.8} onPress={() => setPickerVisible(true)}>
+        <TouchableOpacity
+          style={[styles.fab, requiresSiteSelection && styles.fabDisabled]}
+          activeOpacity={0.8}
+          disabled={requiresSiteSelection}
+          onPress={() => setPickerVisible(true)}
+        >
           <Ionicons name="add" size={28} color={colors.white} />
           <Text style={styles.fabText}>Start New Survey</Text>
         </TouchableOpacity>
@@ -215,6 +256,21 @@ export default function SurveysListScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background.page },
   center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.background.page },
+  sitePickerWrap: { paddingHorizontal: 16, paddingTop: 12 },
+  warningBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginHorizontal: 16,
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.status.atRisk + "55",
+    backgroundColor: colors.status.atRisk + "12",
+  },
+  warningText: { flex: 1, fontSize: 14, color: colors.status.atRisk, fontWeight: "500" },
   filterRow: { flexDirection: "row", paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
   filterChip: {
     paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20,
@@ -230,6 +286,7 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
     shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 8, elevation: 6,
   },
+  fabDisabled: { backgroundColor: colors.text.muted, shadowOpacity: 0, elevation: 0 },
   fabText: { fontSize: 17, fontWeight: "600", color: colors.white },
   card: { backgroundColor: colors.background.card, borderRadius: 14, padding: 18, marginBottom: 10, borderWidth: 1, borderColor: "#E5E7EB" },
   cardRow: { flexDirection: "row", alignItems: "center" },
