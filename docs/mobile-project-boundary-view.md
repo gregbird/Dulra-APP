@@ -152,12 +152,20 @@ const { data: sites } = await supabase.rpc('get_project_sites_with_geojson', {
 
 ## Test Senaryoları
 
-- [ ] Web'de yeni proje oluştur (boundary çiz) → mobile'a geç → harita refresh → boundary görünüyor.
-- [ ] Multi-site proje (web'de 2+ site eklenmiş) → mobile'da hepsi farklı polygon olarak render.
-- [ ] Legacy proje (sadece `projects.boundary`, hiç site yok) → fallback çalışıyor.
-- [ ] Boundary'siz proje (her ikisi de null) → placeholder gösteriliyor, crash yok.
-- [ ] Org dışı bir projeye erişim denemesi → null döner, error toast.
-- [ ] Offline cache: SQLite'a son fetch edilen GeoJSON yazılmalı; offline açılışta cached boundary gösterilsin (releve cache pattern'i gibi).
+- [x] Web'de yeni proje oluştur (boundary çiz) → mobile'a geç → harita refresh → boundary görünüyor. *(Apro, Lismore Co. Waterford ile cihazda doğrulandı.)*
+- [x] Multi-site proje (web'de 2+ site eklenmiş) → mobile'da hepsi farklı polygon olarak render. *(Test apro, 2 site Sligo bölgesi.)*
+- [x] Legacy proje (sadece `projects.boundary`, hiç site yok) → fallback çalışıyor. *(Apro projesinde site array boş geldi, project-level boundary fallback render edildi.)*
+- [x] Boundary'siz proje (her ikisi de null) → placeholder gösteriliyor, crash yok. *(`hasGeometry` false branch'i: "Boundary not set" placeholder rendering doğrulandı.)*
+- [ ] Org dışı bir projeye erişim denemesi → null döner, error toast. *(Sahada test edilmedi — RPC SECURITY DEFINER + organization gate web tarafında doğrulanmış, mobile aynı RPC'yi çağırıyor.)*
+- [x] Offline cache: SQLite'a son fetch edilen GeoJSON yazılmalı; offline açılışta cached boundary gösterilsin. *(`cached_project_boundaries` tablosu üzerinden doğrulandı. `clearCachedData()` artık dokunmuyor → kalıcı.)*
+
+### Ek olarak doğrulanan
+
+- [x] **Site seçimi → kamera zoom** — preview ve fullscreen'de SitePicker değişimi `fitToCoordinates(animated: true)` ile çalışıyor.
+- [x] **Pan/zoom smoothness** — iOS'ta `shouldReplaceMapContent` ile çift tile render kaldırıldı, kullanıcı "yükleme hissiyatı" giderildi.
+- [x] **Offline → online geçişi** — `isOnline` useEffect dependency olduğu için preview/fullscreen otomatik re-fetch ediyor.
+- [x] **NetInfo race** — reload sonrası store offline derken aktif `NetInfo.fetch()` sondajıyla RPC çağrısı çalışıyor.
+- [x] **Online + offline tutarlı satellite görünüm** — ESRI cache hit'lerde her iki durumda da aynı imagery; cache miss iOS'ta Apple satellite fallback.
 
 ---
 
