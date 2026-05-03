@@ -2,7 +2,7 @@
 
 > **Created:** 2026-05-03
 > **Scope:** Mobile yalnızca **görüntüler** — proje oluşturma, veri girişi, boundary çizim/edit YOK. Web'de proje oluşturulduğunda mobile haritada o projenin boundary'sini gösterir.
-> **Status:** ⏸ Mobile takıma iletilmek üzere
+> **Status:** ✅ Implementation tamamlandı (2026-05-03). Aşağıdaki "Implementation" bölümünde yapılanlar listeli.
 
 ---
 
@@ -175,9 +175,125 @@ Hiçbir web değişikliği gerekmiyor — RPC'ler mevcut, RLS/auth kurulu. Web t
 
 ---
 
-## Sorular (mobile takıma)
+## Sorular (mobile takıma) — yanıtlar
 
-1. Mobile şu an hangi map kütüphanesini kullanıyor? GeoJSON desteği nasıl? (Doğrulama için.)
-2. Project list ekranı zaten var mı? Yoksa onu da bu PR'a dahil edelim mi?
-3. Offline cache stratejisi var mı (releve gibi `cached_*` tabloları)? Boundary için de aynı pattern.
-4. Map zoom/center default'u — projenin `center_point`'i mu yoksa boundary bbox'a fit mi?
+1. **Map kütüphanesi:** Mobile'da hiç map kütüphanesi yoktu. `react-native-maps@1.20.1` (Expo SDK 54 uyumlu) eklendi. iOS Apple Maps + Android Google Maps base, GeoJSON Polygon overlay desteği var (`react-native-maps`'in `<Polygon>` component'i `{latitude, longitude}[]` array'i alıyor — `polygonToCoordinates` helper'ı GeoJSON'dan dönüştürüyor).
+2. **Project list ekranı:** `src/screens/projects-screen.tsx` zaten vardı. Bu PR'a dahil edilmedi.
+3. **Offline cache stratejisi:** SQLite `cached_*` paterni mevcut. Boundary için ayrı tablo açıldı (aşağıda detay).
+4. **Map zoom/center:** Bbox-fit. `mapRef.fitToCoordinates(allCoords, { edgePadding })`. `center_point` kullanılmadı — bbox tüm geometriyi sığdırdığı için site farklı boyutlarda olsa bile doğru framing veriyor.
+
+---
+
+## Implementation
+
+> Implementation date: 2026-05-03
+> tsc clean. Multi-site (Test apro, 2 sites + boundary) ve single-site (Apro) cihazda doğrulandı.
+
+### Yeni dosyalar
+
+#### `src/lib/project-boundary.ts`
+
+Boundary fetch + parse + GeoJSON helpers'ı içeren tek servis.
+
+- `fetchProjectBoundary(projectId)` — `get_project_with_geojson` ve `get_project_sites_with_geojson` RPC'lerini paralel çağırır. Sonucu `cached_project_boundaries` tablosuna yazar (online'da). Offline'da veya RPC fail olunca cache fallback.
+- `flattenBoundaryCoordinates(data)` — Tüm polygon ring'lerini düz `{latitude, longitude}` array'ine çevirir → `fitToCoordinates` için.
+- `polygonToCoordinates(polygon)` — Tek polygon'un outer ring'ini `react-native-maps` formatına çevirir → `<Polygon coordinates={...} />` için.
+- **NetInfo race guard** — `useNetworkStore.isOnline` pessimistic default `false` olduğu için, store offline diyorsa aktif `NetInfo.fetch()` ile gerçek durum sondajlanıyor.
+
+#### `src/components/project-boundary-preview.tsx`
+
+Project detail ekranındaki ~200px tappable preview kart.
+- `MapView` + `UrlTile` (ESRI World Imagery) + `Polygon` overlay'leri.
+- Pan/zoom gestures aktif (read-only kart, sadece tek-tap fullscreen'e geçer).
+- "Open map" pill'i sağ alt köşede tap target — map gestures'ı boğmuyor.
+- `selectedSiteId` değişince `fitToCoordinates` ile o site'a animated zoom.
+- `isOnline` değişince re-fetch.
+- Empty state: "Boundary not set" — proje hâlâ haritalanmamışsa.
+
+#### `src/screens/project-map-screen.tsx` + `src/app/project/[id]/map.tsx`
+
+Fullscreen map route. Preview ile aynı tile/polygon stack'i + gestures, my-location button, SitePicker overlay (multi-site).
+
+URL `?siteId=...` parametresiyle preview state'i taşınıyor → fullscreen aynı site seçili açılır.
+
+### Değişen dosyalar
+
+#### `src/lib/database.ts` — v10 migration
+
+Mevcut migration zinciri:
+- v9: `cached_projects`'e `boundary_geojson` + `sites_geojson` eklendi (orphan kaldı, harmsiz).
+- **v10: ayrı tablo:**
+
+```sql
+CREATE TABLE IF NOT EXISTS cached_project_boundaries (
+  project_id TEXT PRIMARY KEY,
+  boundary_geojson TEXT,
+  sites_geojson TEXT,
+  cached_at TEXT NOT NULL
+);
+```
+
+Yeni helper'lar: `setCachedProjectBoundary`, `getCachedProjectBoundary`.
+
+**Neden ayrı tablo:** v9'da `cached_projects`'e kolon eklemiştik ama `clearCachedData()` her cacheAllData'da `cached_projects`'i siliyordu → boundary cache'i her seferinde uçuyordu, sonraki offline açılış boş kalıyordu. Ayrı tablo `clearCachedData`'nın dokunmadığı yerde durur, kalıcı.
+
+#### `src/lib/cache-refresh.ts`
+
+Login/refresh sonrası eklenen `warmProjectBoundaries(projectIds, concurrency=8)`:
+- Tüm proje boundary'lerini paralel batch'lerde (8'er) çeker.
+- Her başarılı çağrı kendi cache'ini yazar (yeni `cached_project_boundaries`).
+- Hatalar swallow — bir bozuk proje diğerlerini durdurmuyor.
+- `cacheAllData()` ana transaction'ı bittikten sonra çalışıyor; metadata zaten cache'de, boundary fetch UI'ı bloklamadan disk'e iniyor.
+
+Sonuç: kullanıcı login olur olmaz tüm projelerin boundary'leri arka planda warm — sonradan offline'a geçince hepsi çalışır.
+
+#### `src/screens/project-detail-screen.tsx`
+
+- Header altına `<ProjectBoundaryPreview>` eklendi.
+- Tap → `router.push(/project/[id]/map?siteId=...)` (effectiveSiteId state'i URL'e geçer).
+
+#### `package.json`
+
+- `react-native-maps@1.20.1` eklendi (Expo SDK 54 uyumlu).
+
+### Tile rendering matrix
+
+ESRI World Imagery (`https://server.arcgisonline.com/.../World_Imagery/MapServer/tile/{z}/{y}/{x}`, key-free). Tile cache disk'te (`Paths.cache.uri/map-tiles`, 30 gün TTL).
+
+| Durum | iOS | Android |
+| --- | --- | --- |
+| Online + ESRI cache hit | ESRI satellite | ESRI satellite |
+| Online + ESRI loading | Apple satellite (fallback) → ESRI (geldikçe) | Boş → ESRI (geldikçe) |
+| Offline + cache hit | ESRI satellite (cache) | ESRI satellite (cache) |
+| Offline + cache miss | Apple satellite fallback (mapType="satellite") | Boş gri (no Google Maps key) |
+
+`<UrlTile shouldReplaceMapContent>` iOS'ta UrlTile'ın altındaki Apple Maps base'in render edilmemesini sağlıyor → çift render olmuyor, pan smooth (pan'da "yükleme hissiyatı" şikayetinin çözümü). Apple satellite hâlâ fallback için tetiklenebiliyor (mapType="satellite"). Android'de mapType="none" ile Google Maps base tamamen kapalı.
+
+### SitePicker davranışı (web parite)
+
+- "All Sites" → tüm site'lar yeşil (`colors.primary.DEFAULT` 33% fill, 3px stroke).
+- Spesifik site seçili → o yeşil + 3px stroke + dolu fill; diğer site'lar `#94a3b8` 2px stroke + transparent fill ("orada başka site'lar var" hint'i).
+- Seçim değişince hem preview hem fullscreen kamera o site'ın polygon'una `fitToCoordinates(animated: true)` ile zoom.
+
+### Bağımlılıklar / kapsam dışı
+
+- `buffer_distances` ve `visible_layers` (RPC payload'ında var ama analiz feature'ları) **kullanılmıyor** — sadece boundary polygon + center marker yok + bbox fit.
+- WMS overlay'leri (NPWS, EPA, NLC vb.) bu PR'ın dışında.
+- Walkover / multi-point survey location: `surveys` tablosunda location kolonu olmadığı için bu PR'a dahil değil.
+
+### Test sonuçları
+
+Cihazda doğrulananlar:
+- ✅ Single-site proje (Apro, Lismore Co. Waterford) — preview + fullscreen + bbox-fit.
+- ✅ Multi-site proje (Test apro, 2 site Sligo bölgesi) — "All Sites" hepsi colored, spesifik site seç → primary + faded others, kamera zoom.
+- ✅ Online → offline geçişi: cache hit'te tutarlı satellite görünüm.
+- ✅ Offline cold start (cache empty) — Apple satellite fallback (iOS), placeholder mesaj (cache hiç warm olmadıysa).
+- ✅ Pan/zoom smooth (shouldReplaceMapContent sayesinde tek render katmanı).
+- ✅ NetInfo race fix — reload sonrası store offline derken bile RPC çağrılabiliyor.
+- ✅ Web'in `getPhotoDisplayUrl` benzeri fix'i değil ama web'in `getProjectWithGeoJson` RPC'leri direkt tüketiliyor.
+
+### Bilinen kısıtlamalar
+
+- Tile cache **bölge bazlı**: kullanıcı ilk kez online açtığı bölgenin tile'ları indirilir. Hiç görmediği projenin bölgesini offline'da açarsa Apple satellite (iOS) veya boş gri (Android) görünür.
+- Android için Google Maps API key set edilmedi (`app.json` → `android.config.googleMaps.apiKey`). Android base layer'ı şu an `mapType="none"` olduğu için sorun yaratmıyor; ama eğer ileri bir özellikte Google Maps base'i lazım olursa key eklenmesi gerekir.
+- Web'in 4 stil (`streets/satellite/hybrid/topo`) switcher'ı mobile'da yok — sadece satellite (saha kullanımına en uygunu).

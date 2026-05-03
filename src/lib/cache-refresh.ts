@@ -12,6 +12,21 @@ import {
   getDatabase,
 } from "@/lib/database";
 import { buildFormDataFromReleve } from "@/lib/releve-save";
+import { fetchProjectBoundary } from "@/lib/project-boundary";
+
+/**
+ * Sequential batches of `concurrency` boundary fetches. Each call writes
+ * its own cache row on success. Errors swallow — one bad project doesn't
+ * stop the rest. Used as a side-effect during cacheAllData so going
+ * offline immediately after login still leaves every project's map
+ * working.
+ */
+async function warmProjectBoundaries(projectIds: string[], concurrency = 8): Promise<void> {
+  for (let i = 0; i < projectIds.length; i += concurrency) {
+    const batch = projectIds.slice(i, i + concurrency);
+    await Promise.allSettled(batch.map((id) => fetchProjectBoundary(id)));
+  }
+}
 
 export async function cacheAllData(): Promise<boolean> {
   const { isOnline } = useNetworkStore.getState();
@@ -183,6 +198,16 @@ export async function cacheAllData(): Promise<boolean> {
         }
       }
     });
+
+    // Warm the project boundary cache so the map screens work the moment
+    // a user goes offline after login. Runs after the main transaction so
+    // a slow batch doesn't hold the UI's loading state on the metadata —
+    // the screens already render from cached_projects rows; boundary cache
+    // simply unlocks the map viewport without a network round-trip.
+    if (projects && projects.length > 0) {
+      const projectIdList = projects.map((p) => p.id as string);
+      await warmProjectBoundaries(projectIdList);
+    }
 
     return surveys != null;
   } catch {

@@ -108,8 +108,6 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       health_status TEXT,
       county TEXT,
       updated_at TEXT,
-      boundary_geojson TEXT,
-      sites_geojson TEXT,
       cached_at TEXT NOT NULL
     );
 
@@ -179,6 +177,18 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       key TEXT PRIMARY KEY,
       value TEXT
     );
+
+    -- Boundary cache lives in its own table so the cacheAllData() refresh
+    -- doesn't wipe it when clearCachedData() truncates cached_projects.
+    -- Without this split, every cache refresh erases freshly-warmed boundaries
+    -- before warmProjectBoundaries() has a chance to repopulate them, and an
+    -- offline open straight after refresh shows empty maps.
+    CREATE TABLE IF NOT EXISTS cached_project_boundaries (
+      project_id TEXT PRIMARY KEY,
+      boundary_geojson TEXT,
+      sites_geojson TEXT,
+      cached_at TEXT NOT NULL
+    );
   `);
 
   // ==== Column safety pass — idempotent, runs every startup ====
@@ -206,11 +216,10 @@ async function initTables(database: SQLite.SQLiteDatabase) {
   // tags is JSON-encoded string[] (e.g. '["site"]'). NULL means no tags.
   await tryAddColumn(database, "pending_photos", "tags", "TEXT");
   await tryAddColumn(database, "pending_photos", "caption", "TEXT");
-  // v9: project boundary cache. Both columns hold JSON-encoded GeoJSON
-  // (Polygon Feature for boundary_geojson, array of site rows with embedded
-  // Polygon geometries for sites_geojson). NULL when never fetched.
-  await tryAddColumn(database, "cached_projects", "boundary_geojson", "TEXT");
-  await tryAddColumn(database, "cached_projects", "sites_geojson", "TEXT");
+  // v9 had boundary_geojson + sites_geojson on cached_projects. v10 moved
+  // them to cached_project_boundaries (CREATE TABLE above) so the every-run
+  // clearCachedData wipe doesn't erase them. Old installs keep the orphan
+  // columns — harmless, no longer read.
   try {
     await database.runAsync(`UPDATE pending_surveys SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column not yet added on very old schema */ }
@@ -221,9 +230,9 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
 
-  if (currentVer < 9) {
+  if (currentVer < 10) {
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (9)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (10)`);
   }
 }
 
@@ -609,19 +618,9 @@ export async function cacheProject(params: {
   healthStatus: string | null; county: string | null; updatedAt: string | null;
 }): Promise<void> {
   const database = await getDatabase();
-  // Preserve any boundary cache that was written separately by setCachedProjectBoundary —
-  // a metadata-only refresh shouldn't wipe the GeoJSON we already pulled.
-  const existing = await database.getFirstAsync<{
-    boundary_geojson: string | null;
-    sites_geojson: string | null;
-  }>(
-    `SELECT boundary_geojson, sites_geojson FROM cached_projects WHERE id = ?`,
-    params.id,
-  );
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_projects (id, name, site_code, status, health_status, county, updated_at, boundary_geojson, sites_geojson, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO cached_projects (id, name, site_code, status, health_status, county, updated_at, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     params.id, params.name, params.siteCode, params.status, params.healthStatus, params.county, params.updatedAt,
-    existing?.boundary_geojson ?? null, existing?.sites_geojson ?? null,
     new Date().toISOString(),
   );
 }
@@ -641,8 +640,8 @@ export async function setCachedProjectBoundary(params: {
 }): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `UPDATE cached_projects SET boundary_geojson = ?, sites_geojson = ? WHERE id = ?`,
-    params.boundaryGeojson, params.sitesGeojson, params.projectId,
+    `INSERT OR REPLACE INTO cached_project_boundaries (project_id, boundary_geojson, sites_geojson, cached_at) VALUES (?, ?, ?, ?)`,
+    params.projectId, params.boundaryGeojson, params.sitesGeojson, new Date().toISOString(),
   );
 }
 
@@ -652,7 +651,7 @@ export async function getCachedProjectBoundary(projectId: string): Promise<{
 } | null> {
   const database = await getDatabase();
   return database.getFirstAsync(
-    `SELECT boundary_geojson, sites_geojson FROM cached_projects WHERE id = ?`,
+    `SELECT boundary_geojson, sites_geojson FROM cached_project_boundaries WHERE project_id = ?`,
     projectId,
   );
 }

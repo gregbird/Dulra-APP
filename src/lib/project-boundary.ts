@@ -99,9 +99,28 @@ function siteFromRpc(s: RpcSiteResponse): ProjectBoundarySite {
  * Fetch a project's boundary + sites in parallel from the two SECURITY
  * DEFINER RPCs web also uses. Falls back to the SQLite cache if offline
  * or the request fails. Successful online fetches refresh the cache.
+ *
+ * NetInfo race guard: useNetworkStore.isOnline starts pessimistic (false)
+ * until startNetworkListener's async NetInfo.fetch resolves a few hundred
+ * ms after launch. A cold-start call into this function would otherwise
+ * skip the network entirely and read an empty cache. Active NetInfo.fetch
+ * here resolves the truth before the store has caught up.
  */
 export async function fetchProjectBoundary(projectId: string): Promise<ProjectBoundary> {
-  const isOnline = useNetworkStore.getState().isOnline;
+  let isOnline = useNetworkStore.getState().isOnline;
+  if (!isOnline) {
+    try {
+      const NetInfo = (await import("@react-native-community/netinfo")).default;
+      const state = await NetInfo.fetch();
+      const probedOnline =
+        state.isInternetReachable === true ||
+        (state.isInternetReachable === null && state.isConnected === true);
+      if (probedOnline) {
+        isOnline = true;
+        useNetworkStore.getState().setOnline(true);
+      }
+    } catch { /* probe failed — keep pessimistic value */ }
+  }
   if (!isOnline) {
     const cached = await getCachedProjectBoundary(projectId);
     return cached ? parseCachedBoundary(cached) : emptyBoundary();

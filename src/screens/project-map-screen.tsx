@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Polygon, PROVIDER_DEFAULT } from "react-native-maps";
+import MapView, { Polygon, PROVIDER_DEFAULT, UrlTile } from "react-native-maps";
+import { Paths } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/colors";
@@ -24,6 +26,15 @@ import type { ProjectSite } from "@/types/project";
 
 const FIT_PADDING = { top: 80, right: 60, bottom: 120, left: 60 };
 
+// ESRI World Imagery — free, key-free, matches web's satellite style.
+const SATELLITE_TILE_URL =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+
+// Same path the preview uses — both screens share the same on-disk cache,
+// so a tile fetched from the preview is reused fullscreen and vice versa.
+const TILE_CACHE_PATH = `${Paths.cache.uri}map-tiles`;
+const TILE_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
 export default function ProjectMapScreen() {
   const { id, siteId: initialSiteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
   const router = useRouter();
@@ -33,6 +44,9 @@ export default function ProjectMapScreen() {
   const [projectName, setProjectName] = useState("");
   const [loading, setLoading] = useState(true);
   const mapRef = useRef<MapView>(null);
+  // Re-fetch on offline→online so a placeholder lands on a real boundary
+  // when connectivity returns. Same pattern as ProjectBoundaryPreview.
+  const isOnline = useNetworkStore((s) => s.isOnline);
 
   // Pull boundary geometry + project metadata + site list. Sites come from
   // a separate cached table (used by SitePicker in project-detail too) so we
@@ -83,26 +97,39 @@ export default function ProjectMapScreen() {
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, isOnline]);
 
-  // Re-fit when data lands or the map first becomes ready. Layout-driven so
-  // initial render with empty data still works once the user navigates back.
+  // Coordinates the camera should focus on — narrows to the selected site
+  // when one is picked, falls back to the project-wide bbox otherwise.
+  const getFocusCoords = (): Array<{ latitude: number; longitude: number }> => {
+    if (!data) return [];
+    if (selectedSiteId) {
+      const site = data.sites.find((s) => s.id === selectedSiteId);
+      const sitePoly = polygonToCoordinates(site?.boundary ?? null);
+      if (sitePoly.length > 0) return sitePoly;
+    }
+    return flattenBoundaryCoordinates(data);
+  };
+
+  // Re-fit when the map first becomes ready (initial frame). Layout-driven —
+  // fitToCoordinates before layout is a no-op, so onMapReady is the trigger.
   const handleMapReady = () => {
-    if (!data || !mapRef.current) return;
-    const coords = flattenBoundaryCoordinates(data);
-    if (coords.length > 0) {
-      mapRef.current.fitToCoordinates(coords, { edgePadding: FIT_PADDING, animated: false });
+    const focus = getFocusCoords();
+    if (mapRef.current && focus.length > 0) {
+      mapRef.current.fitToCoordinates(focus, { edgePadding: FIT_PADDING, animated: false });
     }
   };
 
-  // After data arrives, fit again — onMapReady may have fired before data loaded.
+  // Re-fit on data load and on every site selection change so the camera
+  // tracks the user's intent: "All Sites" zooms out to the bbox, picking a
+  // specific site frames just that polygon.
   useEffect(() => {
-    if (!data || !mapRef.current) return;
-    const coords = flattenBoundaryCoordinates(data);
-    if (coords.length > 0) {
-      mapRef.current.fitToCoordinates(coords, { edgePadding: FIT_PADDING, animated: true });
+    const focus = getFocusCoords();
+    if (mapRef.current && focus.length > 0) {
+      mapRef.current.fitToCoordinates(focus, { edgePadding: FIT_PADDING, animated: true });
     }
-  }, [data]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, selectedSiteId]);
 
   const hasGeometry = data ? flattenBoundaryCoordinates(data).length > 0 : false;
 
@@ -152,11 +179,24 @@ export default function ProjectMapScreen() {
             ref={mapRef}
             style={styles.map}
             provider={PROVIDER_DEFAULT}
+            // Same tile matrix as ProjectBoundaryPreview. shouldReplaceMapContent
+            // on iOS prevents the underlying Apple satellite base from being
+            // drawn under our ESRI tiles (perf win during pan). The base
+            // still kicks in transparently when ESRI hasn't loaded a region.
+            mapType={Platform.OS === "android" ? "none" : "satellite"}
             showsUserLocation
             showsMyLocationButton
             toolbarEnabled={false}
             onMapReady={handleMapReady}
           >
+            <UrlTile
+              urlTemplate={SATELLITE_TILE_URL}
+              maximumZ={19}
+              flipY={false}
+              shouldReplaceMapContent
+              tileCachePath={TILE_CACHE_PATH}
+              tileCacheMaxAge={TILE_CACHE_MAX_AGE_SECONDS}
+            />
             {data?.sites.map((site) => {
               const coords = polygonToCoordinates(site.boundary);
               if (coords.length === 0) return null;

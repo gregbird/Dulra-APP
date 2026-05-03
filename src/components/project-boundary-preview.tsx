@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import MapView, { Polygon, PROVIDER_DEFAULT } from "react-native-maps";
+import { ActivityIndicator, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import MapView, { Polygon, PROVIDER_DEFAULT, UrlTile } from "react-native-maps";
 import { Ionicons } from "@expo/vector-icons";
+import { Paths } from "expo-file-system";
 import { colors } from "@/constants/colors";
+import { useNetworkStore } from "@/lib/network";
 import {
   fetchProjectBoundary,
   flattenBoundaryCoordinates,
@@ -21,6 +23,22 @@ interface Props {
 const PREVIEW_HEIGHT = 200;
 const FIT_PADDING = { top: 30, right: 30, bottom: 30, left: 30 };
 
+// ESRI World Imagery — free, no API key, matches the web's satellite style
+// (lib/config/map-constants.ts:36 in web). Native Apple/Google Maps base
+// shows through while tiles load, then UrlTile takes over.
+const SATELLITE_TILE_URL =
+  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
+
+// Persisting tiles to disk so the satellite imagery stays visible offline.
+// Without this, shouldReplaceMapContent on iOS wipes Apple Maps' default
+// base, leaving only the polygon over a blank gray canvas when no network
+// is available. 30-day TTL is enough for field reuse without bloating
+// storage indefinitely.
+// Paths.cache is an expo-file-system v19 Directory; .uri gives us the
+// file:// path string react-native-maps' UrlTile expects.
+const TILE_CACHE_PATH = `${Paths.cache.uri}map-tiles`;
+const TILE_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
 /**
  * Read-only map card shown on the project detail screen. Renders the
  * project boundary plus all site polygons, fitted to bounds. The card is
@@ -31,6 +49,10 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
   const [data, setData] = useState<ProjectBoundary | null>(null);
   const [loading, setLoading] = useState(true);
   const mapRef = useRef<MapView>(null);
+  // Re-fetch when connectivity returns: an offline-first open with no warm
+  // cache yet leaves data empty; once we go online the placeholder should
+  // resolve to a real boundary without forcing the user to navigate away.
+  const isOnline = useNetworkStore((s) => s.isOnline);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,55 +65,102 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [projectId]);
+  }, [projectId, isOnline]);
 
   const allCoords = data ? flattenBoundaryCoordinates(data) : [];
   const hasGeometry = allCoords.length > 0;
 
-  // Fit the camera to all geometry once layout completes. The layout-driven
-  // trigger matters: fitToCoordinates before the map is laid out is a no-op,
-  // so we wait for onMapReady AND for our data state, then fire once.
+  // Coordinates the camera should focus on. When a specific site is picked
+  // we narrow to that polygon; "All Sites" (or a missing site lookup) falls
+  // back to the project-wide bbox so the user always sees something framed.
+  const getFocusCoords = (): Array<{ latitude: number; longitude: number }> => {
+    if (!data) return [];
+    if (selectedSiteId) {
+      const site = data.sites.find((s) => s.id === selectedSiteId);
+      const sitePoly = polygonToCoordinates(site?.boundary ?? null);
+      if (sitePoly.length > 0) return sitePoly;
+    }
+    return flattenBoundaryCoordinates(data);
+  };
+
+  // Fit the camera to whichever coords match the current site selection.
+  // Layout-driven: fitToCoordinates before the map is ready is a no-op, so
+  // both onMapReady and the selectedSiteId effect below need to run.
   const handleMapReady = () => {
-    if (mapRef.current && allCoords.length > 0) {
-      mapRef.current.fitToCoordinates(allCoords, { edgePadding: FIT_PADDING, animated: false });
+    const focus = getFocusCoords();
+    if (mapRef.current && focus.length > 0) {
+      mapRef.current.fitToCoordinates(focus, { edgePadding: FIT_PADDING, animated: false });
     }
   };
 
+  useEffect(() => {
+    const focus = getFocusCoords();
+    if (mapRef.current && focus.length > 0) {
+      mapRef.current.fitToCoordinates(focus, { edgePadding: FIT_PADDING, animated: true });
+    }
+    // getFocusCoords closes over data + selectedSiteId, so re-running on
+    // those two is enough — no need to put the helper itself in deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, selectedSiteId]);
+
   if (loading) {
     return (
-      <TouchableOpacity activeOpacity={0.85} onPress={onPress} style={styles.card}>
+      <View style={styles.card}>
         <View style={[styles.placeholder, styles.center]}>
           <ActivityIndicator size="small" color={colors.primary.DEFAULT} />
         </View>
-      </TouchableOpacity>
+      </View>
     );
   }
 
   if (!data || !hasGeometry) {
     return (
-      <TouchableOpacity activeOpacity={0.85} onPress={onPress} style={styles.card} disabled>
+      <View style={styles.card}>
         <View style={[styles.placeholder, styles.center]}>
           <Ionicons name="map-outline" size={32} color={colors.text.muted} />
           <Text style={styles.placeholderText}>Boundary not set</Text>
           <Text style={styles.placeholderSub}>The project hasn't been mapped yet.</Text>
         </View>
-      </TouchableOpacity>
+      </View>
     );
   }
 
+  // No outer TouchableOpacity wrapper — that would swallow the MapView's
+  // pan/zoom gestures. The "Open map" pill in the corner is the explicit
+  // tap target; the rest of the card is a regular interactive preview.
   return (
-    <TouchableOpacity activeOpacity={0.9} onPress={onPress} style={styles.card}>
+    <View style={styles.card}>
       <MapView
         ref={mapRef}
         style={styles.map}
         provider={PROVIDER_DEFAULT}
-        scrollEnabled={false}
-        zoomEnabled={false}
+        // Tile-source matrix:
+        //   iOS:     mapType="satellite" gives us Apple Maps' native satellite
+        //            tiles as the underlying base — they're system-cached
+        //            and free, so unvisited regions still look like satellite
+        //            offline. shouldReplaceMapContent on the ESRI overlay
+        //            tells iOS not to *render* the base where our tile
+        //            covers it (perf gain during pan: only one tile source
+        //            is drawn at a time). The base only kicks in for areas
+        //            where ESRI tiles haven't loaded yet.
+        //   Android: "none" hides Google Maps' default raster (no API key
+        //            shipped), leaving ESRI as the sole base.
+        mapType={Platform.OS === "android" ? "none" : "satellite"}
+        scrollEnabled
+        zoomEnabled
         rotateEnabled={false}
         pitchEnabled={false}
         toolbarEnabled={false}
         onMapReady={handleMapReady}
       >
+        <UrlTile
+          urlTemplate={SATELLITE_TILE_URL}
+          maximumZ={19}
+          flipY={false}
+          shouldReplaceMapContent
+          tileCachePath={TILE_CACHE_PATH}
+          tileCacheMaxAge={TILE_CACHE_MAX_AGE_SECONDS}
+        />
         {data.sites.map((site) => {
           const coords = polygonToCoordinates(site.boundary);
           if (coords.length === 0) return null;
@@ -117,11 +186,16 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
         )}
       </MapView>
 
-      <View style={styles.tapHint}>
+      <TouchableOpacity
+        style={styles.tapHint}
+        onPress={onPress}
+        activeOpacity={0.7}
+        hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+      >
         <Ionicons name="expand-outline" size={16} color={colors.white} />
         <Text style={styles.tapHintText}>Open map</Text>
-      </View>
-    </TouchableOpacity>
+      </TouchableOpacity>
+    </View>
   );
 }
 
