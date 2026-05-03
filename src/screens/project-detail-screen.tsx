@@ -17,6 +17,7 @@ import { getCachedSurveys, getCachedProjects, getCachedHabitats, getCachedTarget
 import { useNetworkStore } from "@/lib/network";
 import SurveyTypePicker from "@/components/survey-type-picker";
 import SitePicker from "@/components/site-picker";
+import ProjectBoundaryPreview from "@/components/project-boundary-preview";
 import type { Project, ProjectSite } from "@/types/project";
 import type { SurveyTemplate } from "@/types/survey-template";
 
@@ -221,6 +222,17 @@ export default function ProjectDetailScreen() {
               onSelect={setSelectedSiteId}
             />
           </View>
+        )}
+
+        {id && (
+          <ProjectBoundaryPreview
+            projectId={id}
+            selectedSiteId={effectiveSiteId}
+            onPress={() => {
+              const siteParam = effectiveSiteId ? `?siteId=${effectiveSiteId}` : "";
+              router.push(`/project/${id}/map${siteParam}`);
+            }}
+          />
         )}
 
         {sections.map((section) => {

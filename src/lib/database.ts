@@ -108,6 +108,8 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       health_status TEXT,
       county TEXT,
       updated_at TEXT,
+      boundary_geojson TEXT,
+      sites_geojson TEXT,
       cached_at TEXT NOT NULL
     );
 
@@ -204,6 +206,11 @@ async function initTables(database: SQLite.SQLiteDatabase) {
   // tags is JSON-encoded string[] (e.g. '["site"]'). NULL means no tags.
   await tryAddColumn(database, "pending_photos", "tags", "TEXT");
   await tryAddColumn(database, "pending_photos", "caption", "TEXT");
+  // v9: project boundary cache. Both columns hold JSON-encoded GeoJSON
+  // (Polygon Feature for boundary_geojson, array of site rows with embedded
+  // Polygon geometries for sites_geojson). NULL when never fetched.
+  await tryAddColumn(database, "cached_projects", "boundary_geojson", "TEXT");
+  await tryAddColumn(database, "cached_projects", "sites_geojson", "TEXT");
   try {
     await database.runAsync(`UPDATE pending_surveys SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column not yet added on very old schema */ }
@@ -214,9 +221,9 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
 
-  if (currentVer < 8) {
+  if (currentVer < 9) {
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (8)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (9)`);
   }
 }
 
@@ -602,9 +609,20 @@ export async function cacheProject(params: {
   healthStatus: string | null; county: string | null; updatedAt: string | null;
 }): Promise<void> {
   const database = await getDatabase();
+  // Preserve any boundary cache that was written separately by setCachedProjectBoundary —
+  // a metadata-only refresh shouldn't wipe the GeoJSON we already pulled.
+  const existing = await database.getFirstAsync<{
+    boundary_geojson: string | null;
+    sites_geojson: string | null;
+  }>(
+    `SELECT boundary_geojson, sites_geojson FROM cached_projects WHERE id = ?`,
+    params.id,
+  );
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_projects (id, name, site_code, status, health_status, county, updated_at, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    params.id, params.name, params.siteCode, params.status, params.healthStatus, params.county, params.updatedAt, new Date().toISOString()
+    `INSERT OR REPLACE INTO cached_projects (id, name, site_code, status, health_status, county, updated_at, boundary_geojson, sites_geojson, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.name, params.siteCode, params.status, params.healthStatus, params.county, params.updatedAt,
+    existing?.boundary_geojson ?? null, existing?.sites_geojson ?? null,
+    new Date().toISOString(),
   );
 }
 
@@ -613,7 +631,30 @@ export async function getCachedProjects(): Promise<Array<{
   health_status: string | null; county: string | null; updated_at: string | null;
 }>> {
   const database = await getDatabase();
-  return database.getAllAsync(`SELECT * FROM cached_projects ORDER BY updated_at DESC`);
+  return database.getAllAsync(`SELECT id, name, site_code, status, health_status, county, updated_at FROM cached_projects ORDER BY updated_at DESC`);
+}
+
+export async function setCachedProjectBoundary(params: {
+  projectId: string;
+  boundaryGeojson: string | null;
+  sitesGeojson: string | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE cached_projects SET boundary_geojson = ?, sites_geojson = ? WHERE id = ?`,
+    params.boundaryGeojson, params.sitesGeojson, params.projectId,
+  );
+}
+
+export async function getCachedProjectBoundary(projectId: string): Promise<{
+  boundary_geojson: string | null;
+  sites_geojson: string | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(
+    `SELECT boundary_geojson, sites_geojson FROM cached_projects WHERE id = ?`,
+    projectId,
+  );
 }
 
 export async function cacheHabitat(params: {
