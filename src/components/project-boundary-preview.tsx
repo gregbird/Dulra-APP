@@ -11,6 +11,13 @@ import {
   polygonToCoordinates,
   type ProjectBoundary,
 } from "@/lib/project-boundary";
+import {
+  fetchDesignatedSites,
+  polygonsForRender,
+  getDesignatedSiteColor,
+  designatedCacheKey,
+  type DesignatedSite,
+} from "@/lib/designated-sites";
 
 interface Props {
   projectId: string;
@@ -47,6 +54,7 @@ const TILE_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
  */
 export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPress }: Props) {
   const [data, setData] = useState<ProjectBoundary | null>(null);
+  const [designated, setDesignated] = useState<DesignatedSite[]>([]);
   const [loading, setLoading] = useState(true);
   const mapRef = useRef<MapView>(null);
   // Re-fetch when connectivity returns: an offline-first open with no warm
@@ -57,13 +65,16 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    // Boundary is critical — it controls the loading spinner. Designated
+    // sites are decorative; firing them in parallel but NOT awaiting them
+    // here means a slow/stuck designated RPC can never block the boundary
+    // from rendering. They paint in once they arrive.
     fetchProjectBoundary(projectId)
-      .then((result) => {
-        if (!cancelled) setData(result);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      .then((result) => { if (!cancelled) setData(result); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    fetchDesignatedSites(projectId)
+      .then((result) => { if (!cancelled) setDesignated(result); })
+      .catch(() => { /* swallow — designated layer is non-critical */ });
     return () => { cancelled = true; };
   }, [projectId, isOnline]);
 
@@ -184,6 +195,25 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
             fillColor={colors.primary.DEFAULT + "33"}
           />
         )}
+
+        {/* Designated sites layer: read-only, no taps in the preview — the
+            entire card is a tap target that takes the user to the
+            fullscreen map where polygon taps open the detail modal. */}
+        {designated.map((site) => {
+          const pieces = polygonsForRender(site.geometry);
+          if (pieces.length === 0) return null;
+          const colour = getDesignatedSiteColor(site.site_type);
+          return pieces.map((piece, idx) => (
+            <Polygon
+              key={`${designatedCacheKey(site)}-${idx}`}
+              coordinates={piece.outer}
+              holes={piece.holes.length > 0 ? piece.holes : undefined}
+              strokeColor={colour}
+              strokeWidth={1.5}
+              fillColor={`${colour}40`}
+            />
+          ));
+        })}
       </MapView>
 
       <TouchableOpacity

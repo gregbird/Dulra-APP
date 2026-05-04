@@ -8,7 +8,7 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from "react-native";
-import { useLocalSearchParams, useRouter, Stack } from "expo-router";
+import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
@@ -56,6 +56,42 @@ export default function SurveysListScreen() {
     return map;
   }, [sites]);
 
+  // Per-row visit pill data: { position, total } within the row's
+  // (visit_group_id, site_id) chain — computed straight from the loaded
+  // surveys state instead of cache+pending.
+  //
+  // We deliberately don't pull from loadAllVisitSurveysForProject here:
+  // that helper merges pending_surveys, which can contain stale rows
+  // from earlier failed-sync attempts. Those orphan pending rows
+  // inflate the count without ever appearing in the visible list — the
+  // user sees "2 surveys but the pill says 1/3" because the 3rd is a
+  // ghost in pending. Counting from `surveys` (the actual fetched list)
+  // guarantees the pill matches what's on screen.
+  //
+  // The pill's numerator is the 1-based POSITION in the chain (sorted
+  // by visit_number), not the raw column. Site 1 with two visits always
+  // reads "1/2, 2/2" no matter what visit_number happens to be on disk.
+  const visitPositions = useMemo(() => {
+    const chains = new Map<string, Survey[]>();
+    for (const s of surveys) {
+      if (!s.visit_group_id) continue;
+      const key = `${s.visit_group_id}::${s.site_id ?? "no-site"}`;
+      const arr = chains.get(key) ?? [];
+      arr.push(s);
+      chains.set(key, arr);
+    }
+    const positions = new Map<string, { position: number; total: number }>();
+    for (const members of chains.values()) {
+      const sorted = [...members].sort(
+        (a, b) => (a.visit_number ?? 0) - (b.visit_number ?? 0)
+      );
+      sorted.forEach((s, i) => {
+        positions.set(s.id, { position: i + 1, total: sorted.length });
+      });
+    }
+    return positions;
+  }, [surveys]);
+
   useEffect(() => {
     if (!id) return;
     (async () => {
@@ -74,6 +110,8 @@ export default function SurveysListScreen() {
         ...c, surveyor_id: null, start_time: null, end_time: null,
         sync_status: "synced" as const, created_at: "", updated_at: "",
         status: c.status as Survey["status"],
+        visit_group_id: c.visit_group_id,
+        visit_number: c.visit_number,
       })));
     } else {
       setSurveys([]);
@@ -89,7 +127,7 @@ export default function SurveysListScreen() {
     try {
       let query = supabase
         .from("surveys")
-        .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, weather, form_data, created_at, updated_at, site_id")
+        .select("id, project_id, survey_type, surveyor_id, survey_date, start_time, end_time, status, sync_status, notes, weather, form_data, created_at, updated_at, site_id, visit_group_id, visit_number")
         .eq("project_id", id)
         .order("survey_date", { ascending: false });
       if (effectiveSiteId) query = query.eq("site_id", effectiveSiteId);
@@ -105,6 +143,8 @@ export default function SurveysListScreen() {
             formData: s.form_data as Record<string, unknown> | null,
             notes: s.notes,
             siteId: s.site_id as string | null,
+            visitGroupId: s.visit_group_id as string | null,
+            visitNumber: s.visit_number as number | null,
           });
         }
       }
@@ -116,6 +156,17 @@ export default function SurveysListScreen() {
   useEffect(() => {
     fetchSurveys().finally(() => setLoading(false));
   }, [fetchSurveys]);
+
+  // Re-fetch every time the list is focused so newly-added visits (from
+  // /survey/add-visit) appear without requiring a manual pull-to-refresh.
+  // Without this the user returns from Add Visit save, sees stale list
+  // missing their new Visit N+1 card, and has to drag down to refresh.
+  useFocusEffect(
+    useCallback(() => {
+      fetchSurveys();
+    }, [fetchSurveys])
+  );
+
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -133,6 +184,13 @@ export default function SurveysListScreen() {
   const renderSurvey = ({ item }: { item: Survey }) => {
     const sc = statusColors[item.status] ?? colors.text.muted;
     const siteLabel = !effectiveSiteId && item.site_id ? sitesMap.get(item.site_id) : null;
+    // Visit indicator: position + total within the row's (group, site)
+    // chain. Different sites of the same group_id render as separate
+    // chains, so the user sees per-site sequential numbering (Site 1
+    // 1/2, 2/2 / Site 2 1/3, 2/3, 3/3). Standalone surveys (no group)
+    // intentionally show nothing — "Visit 1/1" everywhere is noise.
+    const visitInfo = visitPositions.get(item.id);
+    const showVisitBadge = !!item.visit_group_id && !!visitInfo;
     return (
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => {
         if (item.survey_type === "releve_survey") {
@@ -143,7 +201,16 @@ export default function SurveysListScreen() {
       }}>
         <View style={styles.cardRow}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.cardTitle}>{surveyTypeLabels[item.survey_type] ?? item.survey_type}</Text>
+            <View style={styles.titleRow}>
+              <Text style={styles.cardTitle}>{surveyTypeLabels[item.survey_type] ?? item.survey_type}</Text>
+              {showVisitBadge && visitInfo && (
+                <View style={styles.visitBadge}>
+                  <Text style={styles.visitBadgeText}>
+                    Visit {visitInfo.position}/{visitInfo.total}
+                  </Text>
+                </View>
+              )}
+            </View>
             <Text style={styles.cardSub}>{formatDate(item.survey_date)}</Text>
             <View style={styles.cardTags}>
               <View style={[styles.tag, { backgroundColor: sc + "1A" }]}>
@@ -290,7 +357,18 @@ const styles = StyleSheet.create({
   fabText: { fontSize: 17, fontWeight: "600", color: colors.white },
   card: { backgroundColor: colors.background.card, borderRadius: 14, padding: 18, marginBottom: 10, borderWidth: 1, borderColor: "#E5E7EB" },
   cardRow: { flexDirection: "row", alignItems: "center" },
-  cardTitle: { fontSize: 17, fontWeight: "600", color: colors.text.heading, marginBottom: 4 },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 },
+  cardTitle: { fontSize: 17, fontWeight: "600", color: colors.text.heading, flexShrink: 1 },
+  visitBadge: {
+    paddingHorizontal: 8, paddingVertical: 2,
+    borderRadius: 8,
+    backgroundColor: colors.primary.DEFAULT + "1A",
+  },
+  visitBadgeText: {
+    fontSize: 12, fontWeight: "700",
+    color: colors.primary.DEFAULT,
+    letterSpacing: 0.2,
+  },
   cardSub: { fontSize: 15, color: colors.text.body, marginBottom: 10 },
   cardTags: { flexDirection: "row", alignItems: "center", gap: 10 },
   tag: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },

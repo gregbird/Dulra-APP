@@ -13,6 +13,10 @@ export interface Survey {
   updated_at: string;
   surveyor_name?: string;
   site_id?: string | null;
+  /** Aynı UUID'yi taşıyan rows bir grup oluşturur. Standalone survey'lerde NULL. */
+  visit_group_id?: string | null;
+  /** Grup içinde sıralı (1, 2, 3 …). Standalone'da NULL. */
+  visit_number?: number | null;
 }
 
 export const surveyTypeLabels: Record<string, string> = {

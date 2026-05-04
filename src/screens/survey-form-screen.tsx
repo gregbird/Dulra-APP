@@ -26,6 +26,11 @@ import { surveyTypeLabels } from "@/types/survey";
 import { useDevEventStore } from "@/lib/dev-events";
 import { generateTestFormData } from "@/lib/dev-fill-data";
 import { useNetworkStore } from "@/lib/network";
+import {
+  loadAllVisitSurveysForProject,
+  type VisitSurveyLike,
+} from "@/lib/visit-groups";
+import VisitsCard from "@/components/visits-card";
 
 function SectionFields({
   fields,
@@ -83,6 +88,12 @@ export default function SurveyFormScreen() {
   const [surveyorId, setSurveyorId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
+  // Visit grouping state. groupSurveys = all surveys in the project so the
+  // gating logic and accordion can derive their views from a single source
+  // — refreshed when the form first loads and after every save.
+  const [groupSurveys, setGroupSurveys] = useState<VisitSurveyLike[]>([]);
+  const [visitGroupId, setVisitGroupId] = useState<string | null>(null);
+  const [visitNumber, setVisitNumber] = useState<number | null>(null);
   const photosRef = useRef<SurveyPhotosHandle>(null);
 
   const loadTemplate = useCallback(async (type: string) => {
@@ -140,6 +151,11 @@ export default function SurveyFormScreen() {
       Object.assign(existing, JSON.parse(cached.form_data));
     }
     setFormData(existing);
+    // Visit grouping fields live on the cached row from v12 onward; older
+    // installs serve null which renders this survey as standalone.
+    const c = cached as unknown as { visit_group_id?: string | null; visit_number?: number | null };
+    setVisitGroupId(c.visit_group_id ?? null);
+    setVisitNumber(c.visit_number ?? null);
     return true;
   }, [surveyId, loadTemplate, router]);
 
@@ -152,7 +168,7 @@ export default function SurveyFormScreen() {
     try {
       const { data: survey, error: surveyError } = await supabase
         .from("surveys")
-        .select("survey_type, weather, form_data, project_id")
+        .select("survey_type, weather, form_data, project_id, visit_group_id, visit_number")
         .eq("id", surveyId)
         .single();
       if (surveyError) throw surveyError;
@@ -165,6 +181,8 @@ export default function SurveyFormScreen() {
 
       setSurveyType(survey.survey_type);
       setProjectId(survey.project_id);
+      setVisitGroupId((survey.visit_group_id as string | null) ?? null);
+      setVisitNumber((survey.visit_number as number | null) ?? null);
 
       const { data: proj } = await supabase
         .from("projects")
@@ -189,6 +207,17 @@ export default function SurveyFormScreen() {
       await restoreFromCached();
     }
   }, [surveyId, loadTemplate, restoreFromCached, router]);
+
+  // Refresh the cached + pending visit graph for the project. Runs after
+  // initial load and whenever we navigate back to this screen so a recent
+  // Add Visit / save reflects in the accordion without a full reload.
+  const refreshGroupSurveys = useCallback(async (pid: string) => {
+    if (!pid) return;
+    try {
+      const all = await loadAllVisitSurveysForProject(pid);
+      setGroupSurveys(all);
+    } catch { /* swallow — accordion just shows empty */ }
+  }, []);
 
   useEffect(() => {
     const init = async () => {
@@ -237,6 +266,15 @@ export default function SurveyFormScreen() {
     };
     init();
   }, []);
+
+  // Visit graph load. Runs after projectId is resolved (via init or
+  // restoreFromCached). Independent from the form-data load so a slow
+  // accordion fetch never blocks the form from rendering.
+  useEffect(() => {
+    if (projectId) {
+      refreshGroupSurveys(projectId);
+    }
+  }, [projectId, refreshGroupSurveys]);
 
   const fillToken = useDevEventStore((s) => s.fillToken);
   const clearFillToken = useDevEventStore((s) => s.clearFillToken);
@@ -287,6 +325,10 @@ export default function SurveyFormScreen() {
     if (result.surveyId) setSurveyId(result.surveyId);
     photosRef.current?.clearPending(result.surveyId ?? undefined);
     setSaving(false);
+
+    // Refresh the accordion: completing this visit may flip the all-completed
+    // gate that hides the Add Visit button.
+    if (projectId) refreshGroupSurveys(projectId);
 
     if (markComplete) {
       Alert.alert("Saved", "Survey completed successfully.", [
@@ -413,6 +455,20 @@ export default function SurveyFormScreen() {
               </View>
             );
           })}
+
+          {/* Visit grouping: only meaningful for an existing survey (the
+              parent of any future Add Visit). New-survey path skips this
+              entirely — the row needs to be saved first. */}
+          {!isNew && surveyId && (
+            <VisitsCard
+              surveyId={surveyId}
+              projectId={projectId}
+              groupId={visitGroupId}
+              currentVisitNumber={visitNumber}
+              groupSurveys={groupSurveys}
+              siteId={params.siteId ?? null}
+            />
+          )}
         </ScrollView>
 
         <View style={styles.footer}>

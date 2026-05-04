@@ -28,6 +28,19 @@ async function warmProjectBoundaries(projectIds: string[], concurrency = 8): Pro
   }
 }
 
+// NOTE: Designated sites (NPWS SAC/SPA/NHA/pNHA) deliberately do NOT have a
+// warm pass. The RPC runs ST_SimplifyPreserveTopology on geometries up to
+// ~313k vertices server-side; even a single in-flight call can be slow
+// enough to starve foreground project taps of a connection. We tried
+// concurrency=1 fire-and-forget and the home screen still took 15-20s
+// while project taps timed out at 50-60s with "Boundary not set".
+//
+// Lazy-load only: fetchDesignatedSites runs when the user opens a project,
+// once per session per project. Cached after the first foreground fetch,
+// so subsequent visits and offline opens still work for that project.
+// Trade-off: a project the user has never opened won't have designated
+// polygons available offline. Acceptable; the boundary itself is warmed.
+
 export async function cacheAllData(): Promise<boolean> {
   const { isOnline } = useNetworkStore.getState();
   if (!isOnline) return false;
@@ -68,7 +81,7 @@ export async function cacheAllData(): Promise<boolean> {
     }
 
     let projectQuery = supabase.from("projects").select("id, name, site_code, status, health_status, county, updated_at").order("updated_at", { ascending: false });
-    let surveyQuery = supabase.from("surveys").select("id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id");
+    let surveyQuery = supabase.from("surveys").select("id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id, visit_group_id, visit_number");
     let habitatQuery = supabase.from("habitat_polygons").select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id");
     let targetNoteQuery = supabase.from("target_notes").select("id, project_id, category, title, description, priority, is_verified, photos, location, site_id");
     let releveQuery = supabase.from("releve_surveys").select("*");
@@ -158,6 +171,8 @@ export async function cacheAllData(): Promise<boolean> {
             formData,
             notes: s.notes,
             siteId: s.site_id as string | null,
+            visitGroupId: s.visit_group_id as string | null,
+            visitNumber: s.visit_number as number | null,
           });
         }
       }
@@ -206,7 +221,11 @@ export async function cacheAllData(): Promise<boolean> {
     // simply unlocks the map viewport without a network round-trip.
     if (projects && projects.length > 0) {
       const projectIdList = projects.map((p) => p.id as string);
-      await warmProjectBoundaries(projectIdList);
+      // FIRE-AND-FORGET: not awaited, so cacheAllData returns the moment
+      // the main transaction lands — home screen renders without waiting
+      // for boundary RPCs. Designated warm intentionally absent (see note
+      // above warmProjectBoundaries).
+      void warmProjectBoundaries(projectIdList);
     }
 
     return surveys != null;

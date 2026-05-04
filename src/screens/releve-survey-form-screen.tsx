@@ -31,6 +31,11 @@ import type { ReleveSpeciesEntry } from "@/types/releve";
 import { useDevEventStore } from "@/lib/dev-events";
 import { generateTestReleveFormData } from "@/lib/dev-fill-data";
 import { useNetworkStore } from "@/lib/network";
+import VisitsCard from "@/components/visits-card";
+import {
+  loadAllVisitSurveysForProject,
+  type VisitSurveyLike,
+} from "@/lib/visit-groups";
 
 /* ── GPS accuracy badge thresholds ──────────────────────────── */
 // CIEEM relevé plot guidance: ≤10m is acceptable for 2x2m or 4m² plots.
@@ -84,6 +89,13 @@ export default function ReleveSurveyFormScreen() {
   const [showHabitatPicker, setShowHabitatPicker] = useState(false);
   const photosRef = useRef<SurveyPhotosHandle>(null);
   const fieldRefs = useRef<Record<string, TextInput>>({});
+  // Visit grouping state — same shape and lifecycle as survey-form-screen
+  // so the VisitsCard component can be reused unchanged. visit_group_id /
+  // visit_number live on the row itself; groupSurveys is the merged
+  // cache+pending list refreshed on load and after each save.
+  const [groupSurveys, setGroupSurveys] = useState<VisitSurveyLike[]>([]);
+  const [visitGroupId, setVisitGroupId] = useState<string | null>(null);
+  const [visitNumber, setVisitNumber] = useState<number | null>(null);
 
   const restoreFromJson = (json: string | Record<string, unknown>) => {
     const parsed = typeof json === "string" ? JSON.parse(json) : json;
@@ -136,6 +148,12 @@ export default function ReleveSurveyFormScreen() {
         if (cached.form_data) {
           restoreFromJson(cached.form_data);
         }
+        // Visit grouping fields — present on cached_surveys from v12 onward.
+        const c = cached as unknown as {
+          visit_group_id?: string | null; visit_number?: number | null;
+        };
+        setVisitGroupId(c.visit_group_id ?? null);
+        setVisitNumber(c.visit_number ?? null);
       }
     }
   }, [isNew, surveyId, projectId]);
@@ -226,7 +244,7 @@ export default function ReleveSurveyFormScreen() {
         // Fetch survey metadata first
         const { data: survey, error: surveyError } = await supabase
           .from("surveys")
-          .select("project_id, status")
+          .select("project_id, status, visit_group_id, visit_number")
           .eq("id", surveyId)
           .single();
         // Custom fetch wrapper returns 503 instead of throwing on network error,
@@ -236,6 +254,8 @@ export default function ReleveSurveyFormScreen() {
           return;
         }
         setProjectId(survey.project_id);
+        setVisitGroupId((survey.visit_group_id as string | null) ?? null);
+        setVisitNumber((survey.visit_number as number | null) ?? null);
         const { data: proj } = await supabase.from("projects").select("name").eq("id", survey.project_id).single();
         if (proj) setProjectName(proj.name);
 
@@ -285,6 +305,58 @@ export default function ReleveSurveyFormScreen() {
   useEffect(() => {
     init().finally(() => setLoading(false));
   }, [init]);
+
+  // Visit graph load — runs after projectId resolves so the VisitsCard
+  // can render siblings and the Add Visit gating reflects current state.
+  // Independent from the form-data load to avoid blocking it on a network
+  // round-trip; the card just shows fewer items if the merge fails.
+  const refreshGroupSurveys = useCallback(async (pid: string) => {
+    if (!pid) return;
+    try {
+      const all = await loadAllVisitSurveysForProject(pid);
+      setGroupSurveys(all);
+    } catch { /* swallow — accordion just shows empty */ }
+  }, []);
+
+  useEffect(() => {
+    if (projectId) {
+      refreshGroupSurveys(projectId);
+    }
+  }, [projectId, refreshGroupSurveys]);
+
+  // Add Visit visits land here with form_data: {} (saveAddVisit creates
+  // the surveys row but leaves the relevé fields blank — the user expects
+  // a fresh-survey feel). Apply the same defaults the brand-new relevé
+  // path uses: project-derived releve_code, current user as recorder,
+  // current site as site_name. We trigger it post-load when basic is
+  // missing, so existing surveys aren't disturbed and isNew/standalone
+  // creation still gets its defaults via the original load branch.
+  useEffect(() => {
+    if (loading || isNew || !surveyId || !projectId) return;
+    const hasBasic = !!(formData.basic && Object.keys(formData.basic).length > 0);
+    if (hasBasic) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const siteName = await getSiteName();
+        const defaults = await getReleveDefaults({
+          projectId,
+          projectName,
+          siteName,
+        });
+        if (cancelled) return;
+        setFormData((prev) => ({
+          ...prev,
+          basic: {
+            releve_code: defaults.releve_code,
+            recorder: defaults.recorder,
+            site_name: defaults.site_name,
+          },
+        }));
+      } catch { /* defaults are best-effort — leave basic empty if the lookup fails */ }
+    })();
+    return () => { cancelled = true; };
+  }, [loading, isNew, surveyId, projectId, projectName, formData.basic, getSiteName]);
 
   const writeLocationToForm = useCallback((loc: { lat: number; lng: number; accuracy: number | null }) => {
     setFormData((prev) => ({
@@ -483,6 +555,9 @@ export default function ReleveSurveyFormScreen() {
     if (result.surveyId) setSurveyId(result.surveyId);
     photosRef.current?.clearPending(result.surveyId ?? undefined);
     setSaving(false);
+    // Refresh the visit graph: completing this visit may flip the
+    // all-completed gate, hiding the Add Visit button.
+    if (projectId) refreshGroupSurveys(projectId);
     Alert.alert("Saved", markComplete ? "Survey completed successfully." : "Progress saved.", [
       { text: "OK", onPress: markComplete ? () => router.back() : undefined },
     ]);
@@ -673,6 +748,20 @@ export default function ReleveSurveyFormScreen() {
               </View>
             )}
           </View>
+
+          {/* Visit grouping: only meaningful for an existing survey. New
+              releve creation skips this entirely — the row needs to be
+              saved first before it can serve as a parent for Add Visit. */}
+          {!isNew && surveyId && (
+            <VisitsCard
+              surveyId={surveyId}
+              projectId={projectId}
+              groupId={visitGroupId}
+              currentVisitNumber={visitNumber}
+              groupSurveys={groupSurveys}
+              siteId={params.siteId ?? null}
+            />
+          )}
 
         </ScrollView>
 

@@ -11,6 +11,7 @@ import {
   sweepStuckPhotos,
   getPendingCount,
   cacheSurvey,
+  deleteCachedSurvey,
 } from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
 import { insertReleveSurvey, upsertReleveSurvey, insertReleveSpecies, extractReleveFromFormData, extractSpeciesFromFormData } from "@/lib/releve-save";
@@ -19,10 +20,15 @@ import { insertReleveSurvey, upsertReleveSurvey, insertReleveSpecies, extractRel
 // make this row sync" — RLS rejections, constraint violations, missing FKs.
 // We mark these as 'conflict' so they stop inflating the pending counter and
 // the user can see them in DevTool → Inspect Pending to decide what to do.
+//
+// 23505 (unique_violation) is intentionally absent: the only unique
+// constraint we currently hit is (visit_group_id, visit_number). When
+// two devices race on Add Visit they can both compute the same
+// visit_number locally — the loser must recompute against the server's
+// MAX and retry, not be marked permanently broken.
 const PERMANENT_PG_CODES = new Set([
   "42501", // insufficient_privilege (RLS)
   "23503", // foreign_key_violation
-  "23505", // unique_violation
   "23514", // check_violation
   "22P02", // invalid_text_representation (bad UUID etc.)
   "23502", // not_null_violation
@@ -95,15 +101,37 @@ async function syncSurveys(): Promise<void> {
     }
 
     if (survey.remote_id) {
-      const { error } = await supabase
+      // visit_group_id / visit_number are nullable on both sides — sending
+      // null keeps standalone surveys standalone, sending a value lights
+      // up the standalone→group conversion path on the server.
+      let updatePayload: Record<string, unknown> = {
+        weather: { templateFields: allFields },
+        form_data: formData,
+        status: survey.status,
+        visit_group_id: survey.visit_group_id ?? null,
+        visit_number: survey.visit_number ?? null,
+        updated_at: new Date().toISOString(),
+      };
+
+      let { error } = await supabase
         .from("surveys")
-        .update({
-          weather: { templateFields: allFields },
-          form_data: formData,
-          status: survey.status,
-          updated_at: new Date().toISOString(),
-        })
+        .update(updatePayload)
         .eq("id", survey.remote_id);
+
+      // 23505 here means another device beat us to (group_id, visit_number).
+      // Recompute MAX(visit_number) on the server and retry once before
+      // giving up — saves the user from having to manually re-add.
+      if (error?.code === "23505" && survey.visit_group_id) {
+        const bumped = await bumpedVisitNumber(survey.visit_group_id);
+        if (bumped) {
+          updatePayload = { ...updatePayload, visit_number: bumped };
+          const retry = await supabase
+            .from("surveys")
+            .update(updatePayload)
+            .eq("id", survey.remote_id);
+          error = retry.error;
+        }
+      }
 
       if (error) {
         if (isPermanentFailure(error)) {
@@ -146,6 +174,8 @@ async function syncSurveys(): Promise<void> {
         formData,
         notes: null,
         siteId: survey.site_id,
+        visitGroupId: survey.visit_group_id,
+        visitNumber: survey.visit_number,
       });
 
       await markSurveySynced(survey.id);
@@ -173,22 +203,43 @@ async function syncSurveys(): Promise<void> {
       } catch { /* fall through to INSERT */ }
 
       if (!remoteId) {
-        const { data, error } = await supabase
+        let insertPayload: Record<string, unknown> = {
+          project_id: survey.project_id,
+          survey_type: survey.survey_type,
+          surveyor_id: surveyorId || null,
+          survey_date: survey.survey_date,
+          status: survey.status,
+          sync_status: "synced",
+          local_id: survey.id,
+          weather: { templateFields: allFields },
+          form_data: formData,
+          site_id: survey.site_id ?? null,
+          visit_group_id: survey.visit_group_id ?? null,
+          visit_number: survey.visit_number ?? null,
+        };
+
+        let { data, error } = await supabase
           .from("surveys")
-          .insert({
-            project_id: survey.project_id,
-            survey_type: survey.survey_type,
-            surveyor_id: surveyorId || null,
-            survey_date: survey.survey_date,
-            status: survey.status,
-            sync_status: "synced",
-            local_id: survey.id,
-            weather: { templateFields: allFields },
-            form_data: formData,
-            site_id: survey.site_id ?? null,
-          })
+          .insert(insertPayload)
           .select("id")
           .single();
+
+        // Race: another device inserted (group, visit_number) first.
+        // Recompute and retry once. Same fallback as the UPDATE path so
+        // a single 23505 doesn't kick the row to the conflict bucket.
+        if (error?.code === "23505" && survey.visit_group_id) {
+          const bumped = await bumpedVisitNumber(survey.visit_group_id);
+          if (bumped) {
+            insertPayload = { ...insertPayload, visit_number: bumped };
+            const retry = await supabase
+              .from("surveys")
+              .insert(insertPayload)
+              .select("id")
+              .single();
+            data = retry.data;
+            error = retry.error;
+          }
+        }
 
         if (error || !data) {
           if (isPermanentFailure(error)) {
@@ -209,6 +260,8 @@ async function syncSurveys(): Promise<void> {
             weather: { templateFields: allFields },
             form_data: formData,
             site_id: survey.site_id ?? null,
+            visit_group_id: survey.visit_group_id ?? null,
+            visit_number: survey.visit_number ?? null,
             updated_at: new Date().toISOString(),
           })
           .eq("id", remoteId);
@@ -244,6 +297,14 @@ async function syncSurveys(): Promise<void> {
         }
       }
 
+      // Drop the local-id row that saveOffline / saveAddVisit wrote so
+      // the surveys list doesn't show the same survey twice (once under
+      // local_xxx, once under the remote uuid). Skip when the local id
+      // happens to match the remote id (defensive — shouldn't happen).
+      if (survey.id !== syncedId) {
+        await deleteCachedSurvey(survey.id);
+      }
+
       await cacheSurvey({
         id: syncedId,
         projectId: survey.project_id,
@@ -254,11 +315,37 @@ async function syncSurveys(): Promise<void> {
         formData,
         notes: null,
         siteId: survey.site_id,
+        visitGroupId: survey.visit_group_id,
+        visitNumber: survey.visit_number,
       });
 
       await markSurveySynced(survey.id);
       await updatePhotoSurveyIds(survey.id, syncedId);
     }
+  }
+}
+
+/**
+ * Server-side recomputation of MAX(visit_number) + 1 for a group, used
+ * when the local optimistic visit_number races and hits 23505. Returns
+ * null on lookup failure so the caller can fall through to the normal
+ * retry-failure path (we don't want a transient 503 to be misclassified
+ * as a conflict).
+ */
+async function bumpedVisitNumber(groupId: string): Promise<number | null> {
+  try {
+    const { data, error } = await supabase
+      .from("surveys")
+      .select("visit_number")
+      .eq("visit_group_id", groupId)
+      .order("visit_number", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return null;
+    const max = (data.visit_number as number | null) ?? 0;
+    return max + 1;
+  } catch {
+    return null;
   }
 }
 

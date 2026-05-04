@@ -189,6 +189,16 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       sites_geojson TEXT,
       cached_at TEXT NOT NULL
     );
+
+    -- Designated sites (NPWS SAC/SPA/NHA/pNHA) live in their own cache for
+    -- the same reason cached_project_boundaries does — clearCachedData()
+    -- mustn't wipe these on every metadata refresh, otherwise the warm
+    -- pass would have to refetch ~hundreds of KB per project on each cycle.
+    CREATE TABLE IF NOT EXISTS cached_designated_sites (
+      project_id TEXT PRIMARY KEY,
+      sites_geojson TEXT,
+      cached_at TEXT NOT NULL
+    );
   `);
 
   // ==== Column safety pass — idempotent, runs every startup ====
@@ -220,6 +230,16 @@ async function initTables(database: SQLite.SQLiteDatabase) {
   // them to cached_project_boundaries (CREATE TABLE above) so the every-run
   // clearCachedData wipe doesn't erase them. Old installs keep the orphan
   // columns — harmless, no longer read.
+
+  // v12 — Add Visit grouping. Both columns nullable: standalone surveys
+  // leave them NULL, gruba dahil olanlar visit_group_id (UUID) ve sıralı
+  // visit_number taşır. pending_surveys'e de ekliyoruz çünkü unsynced bir
+  // parent'ın gruba dönüşümü ve eklenen yeni visit'in visit_number'ı
+  // sync'e kadar local'de saklanmalı.
+  await tryAddColumn(database, "pending_surveys", "visit_group_id", "TEXT");
+  await tryAddColumn(database, "pending_surveys", "visit_number", "INTEGER");
+  await tryAddColumn(database, "cached_surveys", "visit_group_id", "TEXT");
+  await tryAddColumn(database, "cached_surveys", "visit_number", "INTEGER");
   try {
     await database.runAsync(`UPDATE pending_surveys SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column not yet added on very old schema */ }
@@ -230,9 +250,9 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
 
-  if (currentVer < 10) {
+  if (currentVer < 12) {
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (10)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (12)`);
   }
 }
 
@@ -268,6 +288,14 @@ export async function saveSurveyLocally(params: {
   weather: Record<string, unknown>;
   formData: Record<string, unknown>;
   siteId?: string | null;
+  /** Set when this row is part of a visit group (Add Visit flow). */
+  visitGroupId?: string | null;
+  /** Position within the group (1, 2, 3 …). Required if visitGroupId is set. */
+  visitNumber?: number | null;
+  /** Override the row's primary key — used by Add Visit so the parent's
+   *  group conversion can be persisted under a known id when the parent
+   *  is itself an unsynced standalone survey already in pending_surveys. */
+  forcedId?: string;
 }): Promise<string> {
   const database = await getDatabase();
   const now = new Date().toISOString();
@@ -280,25 +308,68 @@ export async function saveSurveyLocally(params: {
     );
     if (existing) {
       await database.runAsync(
-        `UPDATE pending_surveys SET status = ?, weather = ?, form_data = ?, site_id = ?, updated_at = ? WHERE id = ?`,
-        params.status, JSON.stringify(params.weather), JSON.stringify(params.formData), params.siteId ?? null, now, existing.id
+        `UPDATE pending_surveys SET status = ?, weather = ?, form_data = ?, site_id = ?, visit_group_id = ?, visit_number = ?, updated_at = ? WHERE id = ?`,
+        params.status, JSON.stringify(params.weather), JSON.stringify(params.formData),
+        params.siteId ?? null, params.visitGroupId ?? null, params.visitNumber ?? null,
+        now, existing.id
       );
       return existing.id;
     }
   }
 
-  const id = generateId();
+  const id = params.forcedId ?? generateId();
 
   await database.runAsync(
-    `INSERT INTO pending_surveys (id, remote_id, project_id, survey_type, surveyor_id, survey_date, status, weather, form_data, site_id, sync_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    `INSERT INTO pending_surveys (id, remote_id, project_id, survey_type, surveyor_id, survey_date, status, weather, form_data, site_id, visit_group_id, visit_number, sync_status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     id, params.remoteId ?? null, params.projectId, params.surveyType, params.surveyorId,
     params.surveyDate, params.status,
     JSON.stringify(params.weather), JSON.stringify(params.formData),
-    params.siteId ?? null, now, now
+    params.siteId ?? null, params.visitGroupId ?? null, params.visitNumber ?? null,
+    now, now
   );
 
   return id;
+}
+
+/**
+ * Convert a still-pending standalone survey into the first member of a
+ * visit group. Used by Add Visit when the parent hasn't synced yet —
+ * UPDATEs the existing pending_surveys row in place so its eventual INSERT
+ * carries visit_group_id/visit_number=1 to the server. After this the
+ * caller saves the new visit (visit_number=2) as a fresh pending row
+ * sharing the same group_id.
+ */
+export async function setPendingSurveyVisitGroup(params: {
+  pendingId: string;
+  visitGroupId: string;
+  visitNumber: number;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE pending_surveys SET visit_group_id = ?, visit_number = ?, updated_at = ? WHERE id = ?`,
+    params.visitGroupId, params.visitNumber, new Date().toISOString(), params.pendingId
+  );
+}
+
+/**
+ * Look up a pending row by either its local id or its remote id. Add
+ * Visit's group-conversion path needs this because the survey-form screen
+ * has the *remote* id (from `cached_surveys` or a synced fetch) but
+ * pending_surveys is keyed by local id with the remote_id stored as a
+ * column.
+ */
+export async function getPendingSurveyByAnyId(id: string): Promise<{
+  id: string;
+  remote_id: string | null;
+  visit_group_id: string | null;
+  visit_number: number | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(
+    `SELECT id, remote_id, visit_group_id, visit_number FROM pending_surveys WHERE (id = ? OR remote_id = ?) AND sync_status = 'pending' ORDER BY updated_at DESC LIMIT 1`,
+    id, id
+  );
 }
 
 export async function updateSurveyLocally(params: {
@@ -341,10 +412,35 @@ export async function getPendingSurveys(): Promise<Array<{
   form_data: string;
   sync_status: string;
   site_id: string | null;
+  visit_group_id: string | null;
+  visit_number: number | null;
 }>> {
   const database = await getDatabase();
   return database.getAllAsync(
     `SELECT * FROM pending_surveys WHERE sync_status = 'pending'`
+  );
+}
+
+/**
+ * Pending rows for a single project, regardless of sync_status. The visit
+ * helpers need access to the *full* visit graph for a project so
+ * getNextVisitNumber doesn't undercount when a previous Add Visit attempt
+ * already raced ahead in the queue.
+ */
+export async function getPendingSurveysForProject(projectId: string): Promise<Array<{
+  id: string;
+  remote_id: string | null;
+  project_id: string;
+  survey_type: string;
+  status: string;
+  site_id: string | null;
+  visit_group_id: string | null;
+  visit_number: number | null;
+}>> {
+  const database = await getDatabase();
+  return database.getAllAsync(
+    `SELECT id, remote_id, project_id, survey_type, status, site_id, visit_group_id, visit_number FROM pending_surveys WHERE project_id = ?`,
+    projectId
   );
 }
 
@@ -581,24 +677,29 @@ export async function cacheSurvey(params: {
   formData: Record<string, unknown> | null;
   notes: string | null;
   siteId?: string | null;
+  visitGroupId?: string | null;
+  visitNumber?: number | null;
 }): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_surveys (id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id, cached_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO cached_surveys (id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id, visit_group_id, visit_number, cached_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     params.id, params.projectId, params.surveyType, params.surveyDate,
     params.status, JSON.stringify(params.weather),
-    JSON.stringify(params.formData), params.notes, params.siteId ?? null, new Date().toISOString()
+    JSON.stringify(params.formData), params.notes, params.siteId ?? null,
+    params.visitGroupId ?? null, params.visitNumber ?? null,
+    new Date().toISOString()
   );
 }
 
 export async function getCachedSurveys(projectId: string): Promise<Array<{
   id: string; project_id: string; survey_type: string; survey_date: string;
   status: string; notes: string | null; site_id: string | null;
+  visit_group_id: string | null; visit_number: number | null;
 }>> {
   const database = await getDatabase();
   return database.getAllAsync(
-    `SELECT id, project_id, survey_type, survey_date, status, notes, site_id FROM cached_surveys WHERE project_id = ? ORDER BY survey_date DESC`,
+    `SELECT id, project_id, survey_type, survey_date, status, notes, site_id, visit_group_id, visit_number FROM cached_surveys WHERE project_id = ? ORDER BY survey_date DESC`,
     projectId
   );
 }
@@ -611,6 +712,17 @@ export async function getCachedSurvey(surveyId: string): Promise<{
   return database.getFirstAsync(
     `SELECT * FROM cached_surveys WHERE id = ?`, surveyId
   );
+}
+
+/**
+ * Drop a cached row by id. Used when a previously-offline survey gets
+ * its real remote uuid during sync — we must remove the local-id row
+ * before writing the remote-id row, otherwise the surveys list shows
+ * the same survey twice (once under local_xxx, once under the uuid).
+ */
+export async function deleteCachedSurvey(surveyId: string): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(`DELETE FROM cached_surveys WHERE id = ?`, surveyId);
 }
 
 export async function cacheProject(params: {
@@ -652,6 +764,27 @@ export async function getCachedProjectBoundary(projectId: string): Promise<{
   const database = await getDatabase();
   return database.getFirstAsync(
     `SELECT boundary_geojson, sites_geojson FROM cached_project_boundaries WHERE project_id = ?`,
+    projectId,
+  );
+}
+
+export async function setCachedDesignatedSites(params: {
+  projectId: string;
+  sitesGeojson: string | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO cached_designated_sites (project_id, sites_geojson, cached_at) VALUES (?, ?, ?)`,
+    params.projectId, params.sitesGeojson, new Date().toISOString(),
+  );
+}
+
+export async function getCachedDesignatedSites(projectId: string): Promise<{
+  sites_geojson: string | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(
+    `SELECT sites_geojson FROM cached_designated_sites WHERE project_id = ?`,
     projectId,
   );
 }

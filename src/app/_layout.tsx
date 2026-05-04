@@ -175,6 +175,14 @@ export default function RootLayout() {
           }}
         />
         <Stack.Screen
+          name="survey/add-visit"
+          options={{
+            headerShown: true,
+            title: "Add Visit",
+            headerBackTitle: "Back",
+          }}
+        />
+        <Stack.Screen
           name="habitat/[habitatId]"
           options={{
             headerShown: true,
