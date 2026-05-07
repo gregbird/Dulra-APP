@@ -8,6 +8,12 @@ interface Props {
   onSelectBaseMap: (id: BaseMapId) => void;
   townlandsEnabled: boolean;
   onToggleTownlands: (enabled: boolean) => void;
+  /** Habitats toggle. Optional so callers that don't render survey-data
+   *  layers (e.g. the preview map on the project detail card) can omit
+   *  the prop entirely — the Survey Layers section is hidden when no
+   *  toggle handler is supplied. */
+  habitatsEnabled?: boolean;
+  onToggleHabitats?: (enabled: boolean) => void;
   /** Visibility is owned by the parent screen so the same button can also
    *  show an "active" indicator when overlays are on. */
   visible: boolean;
@@ -28,10 +34,17 @@ export default function MapLayersControl({
   onSelectBaseMap,
   townlandsEnabled,
   onToggleTownlands,
+  habitatsEnabled,
+  onToggleHabitats,
   visible,
   onOpen,
   onClose,
 }: Props) {
+  // Active dot lights up if any non-default overlay is on. Townlands and
+  // Habitats default to off, so either toggled-on signals an active layer
+  // configuration to the user when the panel is closed.
+  const hasActiveOverlay = townlandsEnabled || !!habitatsEnabled;
+  const showSurveyLayers = !!onToggleHabitats;
   return (
     <>
       <TouchableOpacity
@@ -42,7 +55,7 @@ export default function MapLayersControl({
         accessibilityLabel="Map layers"
       >
         <Ionicons name="layers-outline" size={22} color={colors.text.heading} />
-        {townlandsEnabled && <View style={styles.activeDot} />}
+        {hasActiveOverlay && <View style={styles.activeDot} />}
       </TouchableOpacity>
 
       <Modal
@@ -103,6 +116,43 @@ export default function MapLayersControl({
                 </View>
               </TouchableOpacity>
             </View>
+
+            {/* Survey-derived overlays. "Boundaries" above is administrative
+                geography; this group is data your team has captured —
+                habitats now, additional layers (target notes, releve plots)
+                later. Keeping the two groups separate matches the web's
+                pill grouping and makes the toggle easy to find. Hidden
+                entirely on screens that don't surface survey data
+                (e.g. the project-detail preview map). */}
+            {showSurveyLayers && (
+              <>
+                <Text style={[styles.sectionTitle, styles.sectionTitleSpaced]}>Survey Layers</Text>
+                <View style={styles.optionGroup}>
+                  <TouchableOpacity
+                    style={styles.option}
+                    onPress={() => onToggleHabitats?.(!habitatsEnabled)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[styles.checkbox, habitatsEnabled && styles.checkboxChecked]}>
+                      {habitatsEnabled && (
+                        <Ionicons name="checkmark" size={16} color={colors.white} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={[
+                          styles.optionLabel,
+                          habitatsEnabled && styles.optionLabelActive,
+                        ]}
+                      >
+                        Habitats
+                      </Text>
+                      <Text style={styles.optionHint}>FOSSITT-coloured polygons from field surveys</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
 
             <TouchableOpacity style={styles.close} onPress={onClose} activeOpacity={0.7}>
               <Text style={styles.closeText}>Done</Text>

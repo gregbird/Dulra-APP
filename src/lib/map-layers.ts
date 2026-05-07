@@ -128,6 +128,7 @@ export function resolveTileCachePath(cacheRoot: string, layer: BaseMapTileLayer)
 
 const PREF_BASE_MAP_KEY = "map.base_map";
 const PREF_TOWNLANDS_KEY = "map.townlands_enabled";
+const PREF_HABITATS_KEY = "map.habitats_enabled";
 
 function isBaseMapId(value: string | null | undefined): value is BaseMapId {
   return value === "streets" || value === "satellite" || value === "hybrid" || value === "topographic";
@@ -136,20 +137,27 @@ function isBaseMapId(value: string | null | undefined): value is BaseMapId {
 export interface MapLayerPrefs {
   baseMap: BaseMapId;
   townlandsEnabled: boolean;
+  /** Habitat polygons overlay (FOSSITT-coloured polygons from
+   *  habitat_polygons). Default off — heavy payload on cadastral-import
+   *  outlier projects (one known 11 MB project), so the user opts in once
+   *  they need it. Pref persists per device. */
+  habitatsEnabled: boolean;
 }
 
 export async function loadMapLayerPrefs(): Promise<MapLayerPrefs> {
   try {
-    const [baseRaw, townRaw] = await Promise.all([
+    const [baseRaw, townRaw, habRaw] = await Promise.all([
       getAppState(PREF_BASE_MAP_KEY),
       getAppState(PREF_TOWNLANDS_KEY),
+      getAppState(PREF_HABITATS_KEY),
     ]);
     return {
       baseMap: isBaseMapId(baseRaw) ? baseRaw : DEFAULT_BASE_MAP,
       townlandsEnabled: townRaw === "1",
+      habitatsEnabled: habRaw === "1",
     };
   } catch {
-    return { baseMap: DEFAULT_BASE_MAP, townlandsEnabled: false };
+    return { baseMap: DEFAULT_BASE_MAP, townlandsEnabled: false, habitatsEnabled: false };
   }
 }
 
@@ -162,5 +170,11 @@ export async function saveBaseMapPref(id: BaseMapId): Promise<void> {
 export async function saveTownlandsPref(enabled: boolean): Promise<void> {
   try {
     await setAppState(PREF_TOWNLANDS_KEY, enabled ? "1" : "0");
+  } catch { /* persistence is best-effort — losing a pref isn't fatal */ }
+}
+
+export async function saveHabitatsPref(enabled: boolean): Promise<void> {
+  try {
+    await setAppState(PREF_HABITATS_KEY, enabled ? "1" : "0");
   } catch { /* persistence is best-effort — losing a pref isn't fatal */ }
 }

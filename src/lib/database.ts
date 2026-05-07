@@ -199,6 +199,19 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       sites_geojson TEXT,
       cached_at TEXT NOT NULL
     );
+
+    -- Habitat polygon geometry. Split from cached_habitats so the heavy
+    -- ST_AsGeoJSON payload (typical 200 KB - 2 MB; outlier 11 MB) survives
+    -- a metadata-only clearCachedData() pass. Keyed by (project_id, id) so
+    -- a single project's full geometry set replaces atomically.
+    CREATE TABLE IF NOT EXISTS cached_habitat_boundaries (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      boundary_geojson TEXT,
+      cached_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_cached_habitat_boundaries_project
+      ON cached_habitat_boundaries(project_id);
   `);
 
   // ==== Column safety pass — idempotent, runs every startup ====
@@ -240,6 +253,12 @@ async function initTables(database: SQLite.SQLiteDatabase) {
   await tryAddColumn(database, "pending_surveys", "visit_number", "INTEGER");
   await tryAddColumn(database, "cached_surveys", "visit_group_id", "TEXT");
   await tryAddColumn(database, "cached_surveys", "visit_number", "INTEGER");
+
+  // v13 — Habitat polygons: read-only RPC payload now carries survey_id +
+  // include_in_report, and geometry lives in a sibling boundary cache table
+  // (created above). Both columns nullable so existing rows survive untouched.
+  await tryAddColumn(database, "cached_habitats", "survey_id", "TEXT");
+  await tryAddColumn(database, "cached_habitats", "include_in_report", "INTEGER");
   try {
     await database.runAsync(`UPDATE pending_surveys SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column not yet added on very old schema */ }
@@ -250,9 +269,9 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
 
-  if (currentVer < 12) {
+  if (currentVer < 13) {
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (12)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (13)`);
   }
 }
 
@@ -795,22 +814,42 @@ export async function cacheHabitat(params: {
   euAnnexCode: string | null; surveyMethod: string | null; evaluation: string | null;
   listedSpecies: string[] | null; threats: string[] | null; photos: string[] | null;
   siteId?: string | null;
+  surveyId?: string | null;
+  includeInReport?: boolean | null;
 }): Promise<void> {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT OR REPLACE INTO cached_habitats (id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    params.id, params.projectId, params.fossittCode, params.fossittName, params.areaHectares, params.condition, params.notes, params.euAnnexCode, params.surveyMethod, params.evaluation, JSON.stringify(params.listedSpecies), JSON.stringify(params.threats), JSON.stringify(params.photos), params.siteId ?? null, new Date().toISOString()
+    `INSERT OR REPLACE INTO cached_habitats (id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id, survey_id, include_in_report, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    params.id, params.projectId, params.fossittCode, params.fossittName, params.areaHectares, params.condition, params.notes, params.euAnnexCode, params.surveyMethod, params.evaluation, JSON.stringify(params.listedSpecies), JSON.stringify(params.threats), JSON.stringify(params.photos), params.siteId ?? null, params.surveyId ?? null, params.includeInReport == null ? null : (params.includeInReport ? 1 : 0), new Date().toISOString()
   );
 }
 
+/**
+ * Read habitats joined with their boundary geometry from the sibling cache.
+ * The geometry table is populated separately by fetchProjectHabitats so this
+ * call returns whatever was last cached, even if cacheAllData has just
+ * cleared the metadata side. Listed species/threats/photos remain JSON
+ * strings — callers parse them.
+ */
 export async function getCachedHabitats(projectId: string): Promise<Array<{
   id: string; project_id: string; fossitt_code: string | null; fossitt_name: string | null;
   area_hectares: number | null; condition: string | null; notes: string | null;
   eu_annex_code: string | null; survey_method: string | null; evaluation: string | null;
+  listed_species: string | null; threats: string | null; photos: string | null;
   site_id: string | null;
+  survey_id: string | null;
+  include_in_report: number | null;
+  boundary_geojson: string | null;
 }>> {
   const database = await getDatabase();
-  return database.getAllAsync(`SELECT id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, site_id FROM cached_habitats WHERE project_id = ? ORDER BY fossitt_code`, projectId);
+  return database.getAllAsync(
+    `SELECT h.id, h.project_id, h.fossitt_code, h.fossitt_name, h.area_hectares, h.condition, h.notes, h.eu_annex_code, h.survey_method, h.evaluation, h.listed_species, h.threats, h.photos, h.site_id, h.survey_id, h.include_in_report, b.boundary_geojson
+     FROM cached_habitats h
+     LEFT JOIN cached_habitat_boundaries b ON b.id = h.id
+     WHERE h.project_id = ?
+     ORDER BY h.fossitt_code`,
+    projectId,
+  );
 }
 
 export async function getCachedHabitat(habitatId: string): Promise<{
@@ -818,9 +857,51 @@ export async function getCachedHabitat(habitatId: string): Promise<{
   area_hectares: number | null; condition: string | null; notes: string | null;
   eu_annex_code: string | null; survey_method: string | null; evaluation: string | null;
   listed_species: string | null; threats: string | null; photos: string | null;
+  site_id: string | null;
+  survey_id: string | null;
+  include_in_report: number | null;
+  boundary_geojson: string | null;
 } | null> {
   const database = await getDatabase();
-  return database.getFirstAsync(`SELECT * FROM cached_habitats WHERE id = ?`, habitatId);
+  return database.getFirstAsync(
+    `SELECT h.id, h.project_id, h.fossitt_code, h.fossitt_name, h.area_hectares, h.condition, h.notes, h.eu_annex_code, h.survey_method, h.evaluation, h.listed_species, h.threats, h.photos, h.site_id, h.survey_id, h.include_in_report, b.boundary_geojson
+     FROM cached_habitats h
+     LEFT JOIN cached_habitat_boundaries b ON b.id = h.id
+     WHERE h.id = ?`,
+    habitatId,
+  );
+}
+
+/**
+ * Replace the project's habitat-boundary cache atomically. Wipes any rows
+ * for `projectId` first, then bulk-inserts the new geometry set. We do
+ * this in a single transaction so a partial failure can't leave half the
+ * polygons stale relative to the metadata cache.
+ *
+ * `boundary` is stored as the JSON-stringified GeoJSON the RPC returned
+ * (Polygon or MultiPolygon). Pass null when a row has no geometry — the
+ * row still goes in so a later read returns a complete habitat list,
+ * just without polygon rendering for that one row.
+ */
+export async function setCachedHabitatBoundaries(
+  projectId: string,
+  rows: Array<{ id: string; boundary: unknown | null }>,
+): Promise<void> {
+  const database = await getDatabase();
+  const now = new Date().toISOString();
+  await database.withTransactionAsync(async () => {
+    await database.runAsync(
+      `DELETE FROM cached_habitat_boundaries WHERE project_id = ?`,
+      projectId,
+    );
+    for (const row of rows) {
+      const json = row.boundary ? JSON.stringify(row.boundary) : null;
+      await database.runAsync(
+        `INSERT OR REPLACE INTO cached_habitat_boundaries (id, project_id, boundary_geojson, cached_at) VALUES (?, ?, ?, ?)`,
+        row.id, projectId, json, now,
+      );
+    }
+  });
 }
 
 export async function cacheTargetNote(params: {

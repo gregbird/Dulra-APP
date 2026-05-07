@@ -3,7 +3,7 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/colors";
 import type { HabitatPolygon } from "@/types/habitat";
-import { conditionColors } from "@/types/habitat";
+import { conditionColors, UNCLASSIFIED_HABITAT_COLOR } from "@/types/habitat";
 import { getFossittColor } from "@/lib/fossitt-utils";
 
 interface HabitatListProps {
@@ -16,18 +16,21 @@ export default function HabitatList({ habitats, refreshing, onRefresh }: Habitat
   const router = useRouter();
   const renderHabitat = ({ item }: { item: HabitatPolygon }) => {
     const cond = item.condition ? conditionColors[item.condition] : null;
-    const fossittColor = getFossittColor(item.fossitt_code);
+    // fossitt_code is already normalised to null for the '—' placeholder
+    // by services/habitats.ts and getCachedHabitats's parser, so the only
+    // branch we need here is "code present" vs "no code → Unclassified".
+    const hasCode = !!item.fossitt_code;
+    const fossittColor = hasCode ? getFossittColor(item.fossitt_code) : UNCLASSIFIED_HABITAT_COLOR;
+    const codeLabel = hasCode ? item.fossitt_code : "Unclassified";
 
     return (
       <TouchableOpacity style={styles.card} activeOpacity={0.7} onPress={() => router.push(`/habitat/${item.id}`)}>
         <View style={styles.cardHeader}>
-          {item.fossitt_code && (
-            <View style={[styles.codeBadge, { backgroundColor: fossittColor + "22", borderColor: fossittColor + "55" }]}>
-              <Text style={[styles.codeText, { color: fossittColor }]}>{item.fossitt_code}</Text>
-            </View>
-          )}
+          <View style={[styles.codeBadge, { backgroundColor: fossittColor + "22", borderColor: fossittColor + "55" }]}>
+            <Text style={[styles.codeText, { color: fossittColor }]}>{codeLabel}</Text>
+          </View>
           <Text style={styles.name} numberOfLines={2}>
-            {item.fossitt_name ?? "Unknown Habitat"}
+            {item.fossitt_name ?? (hasCode ? "Unknown Habitat" : "Unmapped polygon")}
           </Text>
         </View>
 

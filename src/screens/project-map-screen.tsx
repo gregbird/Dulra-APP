@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
   ActivityIndicator,
   Dimensions,
@@ -41,12 +41,20 @@ import {
   type DesignatedSite,
 } from "@/lib/designated-sites";
 import {
+  fetchProjectHabitats,
+  habitatPolygonPieces,
+  darkenHex,
+} from "@/lib/habitats";
+import { getFossittColor } from "@/lib/fossitt-utils";
+import { UNCLASSIFIED_HABITAT_COLOR, type HabitatPolygon } from "@/types/habitat";
+import {
   BASE_MAPS,
   DEFAULT_BASE_MAP,
   loadMapLayerPrefs,
   resolveTileCachePath,
   resolveTileUrl,
   saveBaseMapPref,
+  saveHabitatsPref,
   saveTownlandsPref,
   type BaseMapId,
 } from "@/lib/map-layers";
@@ -61,6 +69,7 @@ import {
 } from "@/lib/townlands";
 import MapLayersControl from "@/components/map-layers-control";
 import TownlandDetailModal from "@/components/townland-detail-modal";
+import HabitatMapModal from "@/components/habitat-map-modal";
 import SitePicker from "@/components/site-picker";
 import type { ProjectSite } from "@/types/project";
 
@@ -83,6 +92,11 @@ const Z_BASE_TILE = 0;
 const Z_OVERLAY_TILE = 5;
 const Z_SITE_POLYGON = 10;
 const Z_DESIGNATED = 20;
+// Habitats sit between designated sites and buffer rings: surveyor data is
+// the user's primary focus on this map, so they should read above NPWS
+// context but below the dashed proximity rings (which are thin lines and
+// don't fight the fill visually).
+const Z_HABITAT = 25;
 const Z_BUFFER_RING = 30;
 const Z_TOWNLAND = 40;
 
@@ -99,7 +113,11 @@ const Z_TOWNLAND = 40;
 // hides the iOS satellite base where our tile has loaded.
 
 export default function ProjectMapScreen() {
-  const { id, siteId: initialSiteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
+  const { id, siteId: initialSiteId, focusHabitatId } = useLocalSearchParams<{
+    id: string;
+    siteId?: string;
+    focusHabitatId?: string;
+  }>();
   const router = useRouter();
   const [data, setData] = useState<ProjectBoundary | null>(null);
   const [designated, setDesignated] = useState<DesignatedSite[]>([]);
@@ -119,6 +137,9 @@ export default function ProjectMapScreen() {
   // SQLite asynchronously and may flip the values once it resolves.
   const [baseMap, setBaseMap] = useState<BaseMapId>(DEFAULT_BASE_MAP);
   const [townlandsEnabled, setTownlandsEnabled] = useState(false);
+  const [habitatsEnabled, setHabitatsEnabled] = useState(false);
+  const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
+  const [selectedHabitat, setSelectedHabitat] = useState<HabitatPolygon | null>(null);
   const [layersOpen, setLayersOpen] = useState(false);
   const [townlands, setTownlands] = useState<TownlandFeature[]>([]);
   const [selectedTownland, setSelectedTownland] = useState<TownlandFeature | null>(null);
@@ -136,9 +157,60 @@ export default function ProjectMapScreen() {
       if (cancelled) return;
       setBaseMap(prefs.baseMap);
       setTownlandsEnabled(prefs.townlandsEnabled);
+      setHabitatsEnabled(prefs.habitatsEnabled);
     });
     return () => { cancelled = true; };
   }, []);
+
+  // Habitat polygons. Lazy-fetched once per project per session — same
+  // rationale as fetchDesignatedSites (geometry payload too heavy for the
+  // post-login warm pass on multi-project accounts). Fires regardless of
+  // the toggle so flipping it on doesn't introduce a fetch delay; render
+  // is gated on habitatsEnabled below. isOnline drives a refetch when
+  // connectivity returns so a placeholder cache lands on real data.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    fetchProjectHabitats(id)
+      .then((rows) => { if (!cancelled) setHabitats(rows); })
+      .catch(() => { /* swallow — habitats layer is non-critical */ });
+    return () => { cancelled = true; };
+  }, [id, isOnline]);
+
+  // Focus-from-detail flow: when the detail screen sends focusHabitatId,
+  // force the layer on for this open (the user explicitly asked to see
+  // the polygon — overriding a persisted "off" pref is the right move).
+  // We don't write the pref back so navigating elsewhere preserves the
+  // user's actual preference. Fly-to + sheet open happens once habitats
+  // arrive; see the sibling effect below.
+  useEffect(() => {
+    if (focusHabitatId) setHabitatsEnabled(true);
+  }, [focusHabitatId]);
+
+  // Once the habitat list loads (and a focus id was requested), fit the
+  // camera to that polygon and pop the bottom sheet. We only run this
+  // once per focus-id change so panning the map after arriving doesn't
+  // keep snapping back. mapRef may not be ready yet on the first tick if
+  // the map is still mounting; the dependency on mapRef.current covers
+  // that race because handleMapReady triggers a re-render via state.
+  const focusFiredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusHabitatId || focusFiredRef.current === focusHabitatId) return;
+    if (habitats.length === 0) return;
+    const target = habitats.find((h) => h.id === focusHabitatId);
+    if (!target) return;
+    const pieces = habitatPolygonPieces(target.boundary);
+    const coords: Array<{ latitude: number; longitude: number }> = [];
+    for (const piece of pieces) coords.push(...piece.outer);
+    if (coords.length > 0 && mapRef.current) {
+      mapRef.current.fitToCoordinates(coords, {
+        edgePadding: { top: 120, right: 60, bottom: 200, left: 60 },
+        animated: true,
+      });
+    }
+    setSelectedHabitat(target);
+    focusFiredRef.current = focusHabitatId;
+  }, [focusHabitatId, habitats]);
 
   const baseMapConfig = BASE_MAPS[baseMap];
 
@@ -300,6 +372,90 @@ export default function ProjectMapScreen() {
     setTownlandsEnabled(enabled);
     saveTownlandsPref(enabled);
   };
+
+  const handleToggleHabitats = (enabled: boolean) => {
+    setHabitatsEnabled(enabled);
+    saveHabitatsPref(enabled);
+  };
+
+  // Site-aware habitat list. When the surveyor narrows to one site we hide
+  // the rest of the project's habitats — same rationale as buffer rings:
+  // unrelated polygons add visual noise once the focus has moved. Habitats
+  // with site_id === null (project-wide rows, e.g. legacy imports) stay
+  // visible across both modes so they're never accidentally hidden.
+  const visibleHabitats = useMemo(() => {
+    if (!habitatsEnabled) return [];
+    if (!selectedSiteId) return habitats;
+    return habitats.filter((h) => h.site_id === selectedSiteId || h.site_id === null);
+  }, [habitats, habitatsEnabled, selectedSiteId]);
+
+  // Pre-compute the habitat <Polygon> elements once per data/basemap change.
+  // Without this, every selectedHabitat update (i.e. every polygon tap) had
+  // the parent re-render the entire .map() over visibleHabitats, recreating
+  // hundreds of Polygon JSX objects + closures. On heavy projects (the
+  // cadastral-import outliers carry 600+ polygons after MultiPolygon
+  // decomposition) the reconciliation cost stalled the JS thread for tens
+  // of seconds before the modal could open.
+  //
+  // Memoising the JSX array breaks that link: tap → state change →
+  // reconciler hits the same array reference → no work for the polygon
+  // layer, just the modal renders. setSelectedHabitat is a stable setState
+  // setter so closing over it inside the memo is safe.
+  const habitatPolygonElements = useMemo(() => {
+    const out: ReactElement[] = [];
+    for (const habitat of visibleHabitats) {
+      const pieces = habitatPolygonPieces(habitat.boundary);
+      if (pieces.length === 0) continue;
+      const fill = habitat.fossitt_code
+        ? getFossittColor(habitat.fossitt_code)
+        : UNCLASSIFIED_HABITAT_COLOR;
+      const stroke = darkenHex(fill, 0.65);
+      pieces.forEach((piece, idx) => {
+        out.push(
+          <Polygon
+            key={`${baseMap}-habitat-${habitat.id}-${idx}`}
+            coordinates={piece.outer}
+            holes={piece.holes.length > 0 ? piece.holes : undefined}
+            strokeColor={stroke}
+            strokeWidth={2}
+            fillColor={`${fill}59`}
+            tappable
+            onPress={() => setSelectedHabitat(habitat)}
+            zIndex={Z_HABITAT}
+          />,
+        );
+      });
+    }
+    return out;
+  }, [visibleHabitats, baseMap]);
+
+  // Same memoisation for designated polygons. They're fewer in count
+  // (typically <50 per project), but the same pattern keeps the layers
+  // consistent and makes future additions cheaper.
+  const designatedPolygonElements = useMemo(() => {
+    const out: ReactElement[] = [];
+    for (const site of designated) {
+      const pieces = polygonsForRender(site.geometry);
+      if (pieces.length === 0) continue;
+      const colour = getDesignatedSiteColor(site.site_type);
+      pieces.forEach((piece, idx) => {
+        out.push(
+          <Polygon
+            key={`${baseMap}-${designatedCacheKey(site)}-${idx}`}
+            coordinates={piece.outer}
+            holes={piece.holes.length > 0 ? piece.holes : undefined}
+            strokeColor={colour}
+            strokeWidth={2}
+            fillColor={`${colour}40`}
+            tappable
+            onPress={() => setSelectedDesignated(site)}
+            zIndex={Z_DESIGNATED}
+          />,
+        );
+      });
+    }
+    return out;
+  }, [designated, baseMap]);
 
   // Buffer rings around each site, matching the web map. Each site carries
   // its own buffer_distances (km); when null we fall back to the shared
@@ -476,29 +632,12 @@ export default function ProjectMapScreen() {
                 />
               )}
 
-              {/* Designated sites layer. Drawn after the boundary so they
-                  sit on top of it, with site_type colours at ~25% fill so
-                  the boundary still reads through. tappable=true is what
-                  routes onPress on iOS — without it, taps fall through to
-                  the map. */}
-              {designated.map((site) => {
-                const pieces = polygonsForRender(site.geometry);
-                if (pieces.length === 0) return null;
-                const colour = getDesignatedSiteColor(site.site_type);
-                return pieces.map((piece, idx) => (
-                  <Polygon
-                    key={`${baseMap}-${designatedCacheKey(site)}-${idx}`}
-                    coordinates={piece.outer}
-                    holes={piece.holes.length > 0 ? piece.holes : undefined}
-                    strokeColor={colour}
-                    strokeWidth={2}
-                    fillColor={`${colour}40`}
-                    tappable
-                    onPress={() => setSelectedDesignated(site)}
-                    zIndex={Z_DESIGNATED}
-                  />
-                ));
-              })}
+              {/* Designated sites + habitat polygons are rendered from
+                  pre-memoised JSX arrays so polygon-tap state changes
+                  don't trigger O(N) reconciliation against the layer.
+                  See the useMemo definitions above for why. */}
+              {designatedPolygonElements}
+              {habitatPolygonElements}
 
               {/* Buffer rings. Painted after designated sites (per parity
                   with web) so the dashed outline reads cleanly over NPWS
@@ -546,6 +685,8 @@ export default function ProjectMapScreen() {
               onSelectBaseMap={handleSelectBaseMap}
               townlandsEnabled={townlandsEnabled}
               onToggleTownlands={handleToggleTownlands}
+              habitatsEnabled={habitatsEnabled}
+              onToggleHabitats={handleToggleHabitats}
               visible={layersOpen}
               onOpen={() => setLayersOpen(true)}
               onClose={() => setLayersOpen(false)}
@@ -577,6 +718,10 @@ export default function ProjectMapScreen() {
         <TownlandDetailModal
           feature={selectedTownland}
           onClose={() => setSelectedTownland(null)}
+        />
+        <HabitatMapModal
+          habitat={selectedHabitat}
+          onClose={() => setSelectedHabitat(null)}
         />
       </View>
     </>

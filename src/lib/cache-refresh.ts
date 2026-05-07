@@ -40,6 +40,15 @@ async function warmProjectBoundaries(projectIds: string[], concurrency = 8): Pro
 // so subsequent visits and offline opens still work for that project.
 // Trade-off: a project the user has never opened won't have designated
 // polygons available offline. Acceptable; the boundary itself is warmed.
+//
+// Habitat polygons follow the same pattern. cacheAllData warms metadata
+// only (no boundary geometry) via the direct table select above; the RPC
+// `get_project_habitats` (with ST_AsGeoJSON) is called lazily by
+// fetchProjectHabitats when the user actually opens the project map or
+// the Habitats tab. Geometry payload is typically 200 KB - 2 MB but a
+// known cadastral-import outlier reaches 11 MB; warming that for every
+// project on every session would dominate startup bandwidth for users
+// who never open those projects.
 
 export async function cacheAllData(): Promise<boolean> {
   const { isOnline } = useNetworkStore.getState();
@@ -82,7 +91,7 @@ export async function cacheAllData(): Promise<boolean> {
 
     let projectQuery = supabase.from("projects").select("id, name, site_code, status, health_status, county, updated_at").order("updated_at", { ascending: false });
     let surveyQuery = supabase.from("surveys").select("id, project_id, survey_type, survey_date, status, weather, form_data, notes, site_id, visit_group_id, visit_number");
-    let habitatQuery = supabase.from("habitat_polygons").select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id");
+    let habitatQuery = supabase.from("habitat_polygons").select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id, survey_id, include_in_report");
     let targetNoteQuery = supabase.from("target_notes").select("id, project_id, category, title, description, priority, is_verified, photos, location, site_id");
     let releveQuery = supabase.from("releve_surveys").select("*");
     let sitesQuery = supabase.from("project_sites").select("id, project_id, site_code, site_name, sort_order, county").order("sort_order");
@@ -184,6 +193,8 @@ export async function cacheAllData(): Promise<boolean> {
             surveyMethod: h.survey_method, evaluation: h.evaluation,
             listedSpecies: h.listed_species as string[] | null, threats: h.threats as string[] | null, photos: h.photos as string[] | null,
             siteId: h.site_id as string | null,
+            surveyId: h.survey_id as string | null,
+            includeInReport: h.include_in_report as boolean | null,
           });
         }
       }

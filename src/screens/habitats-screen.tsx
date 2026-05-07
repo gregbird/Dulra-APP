@@ -1,11 +1,9 @@
 import { useEffect, useState, useCallback } from "react";
 import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { useLocalSearchParams, Stack } from "expo-router";
-import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
-import { getCachedHabitats } from "@/lib/database";
 import { cacheAllData } from "@/lib/cache-refresh";
-import { useNetworkStore } from "@/lib/network";
+import { fetchProjectHabitats } from "@/lib/habitats";
 import HabitatList from "@/components/habitat-list";
 import type { HabitatPolygon } from "@/types/habitat";
 
@@ -15,51 +13,29 @@ export default function HabitatsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  // Single source of truth for the list: the RPC wrapper handles the
+  // online → cache fallback internally, so we don't need parallel cache /
+  // network branches here. Site filtering is pushed to the RPC parameter
+  // when present; site_id IS NULL rows still come through (the RPC's WHERE
+  // accepts them), so habitats imported before sites existed still render.
   const fetchHabitats = useCallback(async () => {
     if (!id) return;
-    const readCache = async () => {
-      let cached = await getCachedHabitats(id);
-      if (siteId) cached = cached.filter((h) => h.site_id === siteId || h.site_id === null);
-      setHabitats(cached as HabitatPolygon[]);
-    };
-    if (!useNetworkStore.getState().isOnline) {
-      await readCache();
-      return;
-    }
-    try {
-      let query = supabase
-        .from("habitat_polygons")
-        .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, site_id")
-        .eq("project_id", id)
-        .order("fossitt_code");
-      if (siteId) query = query.or(`site_id.eq.${siteId},site_id.is.null`);
-      const { data, error } = await query;
-      if (error) throw error;
-      if (data) setHabitats(data as HabitatPolygon[]);
-    } catch {
-      await readCache();
-    }
+    const rows = await fetchProjectHabitats(id, siteId ?? null);
+    setHabitats(rows);
   }, [id, siteId]);
 
   useEffect(() => {
     fetchHabitats().finally(() => setLoading(false));
   }, [fetchHabitats]);
 
-  const loadFromCache = useCallback(async () => {
-    if (!id) return;
-    let cached = await getCachedHabitats(id);
-    if (siteId) cached = cached.filter((h) => h.site_id === siteId || h.site_id === null);
-    setHabitats(cached as HabitatPolygon[]);
-  }, [id, siteId]);
-
+  // Pull-to-refresh: full cache rebuild for the metadata side, then a
+  // fresh RPC for the boundary cache. cacheAllData failure (e.g. offline)
+  // still falls through to a plain RPC retry — which itself falls through
+  // to the cache if the network's gone.
   const onRefresh = async () => {
     setRefreshing(true);
-    const ok = await cacheAllData();
-    if (ok) {
-      await loadFromCache();
-    } else {
-      await fetchHabitats();
-    }
+    await cacheAllData();
+    await fetchHabitats();
     setRefreshing(false);
   };
 

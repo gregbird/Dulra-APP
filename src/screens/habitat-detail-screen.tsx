@@ -13,7 +13,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
 import { getCachedHabitat } from "@/lib/database";
-import { conditionColors } from "@/types/habitat";
+import { conditionColors, UNCLASSIFIED_HABITAT_COLOR, normaliseFossittCode } from "@/types/habitat";
 import type { HabitatPolygon } from "@/types/habitat";
 import PhotoViewer from "@/components/photo-viewer";
 import { getFossittColor } from "@/lib/fossitt-utils";
@@ -23,34 +23,79 @@ const screenPadding = 16;
 const cardBorder = 2;
 const imageWidth = Dimensions.get("window").width - (screenPadding * 2) - (cardPadding * 2) - cardBorder;
 
+interface PhotoRow {
+  storage_path: string;
+  watermarked_path: string | null;
+}
+
+function buildPhotoUrl(row: PhotoRow): string {
+  // Match the survey-photos pattern: prefer the watermarked variant
+  // (date+GPS+tag baked in by the mobile capture pipeline). Falling back
+  // to the raw storage_path is intentional — pre-watermark uploads, web
+  // imports, and rows whose watermark job failed all still have a viewable
+  // image. project-photos is the canonical bucket for both.
+  const path = row.watermarked_path ?? row.storage_path;
+  return supabase.storage.from("project-photos").getPublicUrl(path).data.publicUrl;
+}
+
 export default function HabitatDetailScreen() {
   const { habitatId } = useLocalSearchParams<{ habitatId: string }>();
   const router = useRouter();
   const [habitat, setHabitat] = useState<HabitatPolygon | null>(null);
+  const [photoUrls, setPhotoUrls] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetch = async () => {
       if (!habitatId) return;
+      // Metadata first (Supabase → cache fallback). Same shape regardless
+      // of source so the renderer below stays branch-free.
       try {
         const { data, error } = await supabase
           .from("habitat_polygons")
-          .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos")
+          .select("id, project_id, fossitt_code, fossitt_name, area_hectares, condition, notes, eu_annex_code, survey_method, evaluation, listed_species, threats, photos, site_id, survey_id")
           .eq("id", habitatId)
           .single();
         if (error) throw error;
-        if (data) setHabitat(data);
+        if (data) {
+          setHabitat({
+            ...data,
+            fossitt_code: normaliseFossittCode(data.fossitt_code),
+          } as HabitatPolygon);
+        }
       } catch {
         const cached = await getCachedHabitat(habitatId);
         if (cached) {
           setHabitat({
             ...cached,
+            fossitt_code: normaliseFossittCode(cached.fossitt_code),
             listed_species: cached.listed_species ? JSON.parse(cached.listed_species) : null,
             threats: cached.threats ? JSON.parse(cached.threats) : null,
             photos: cached.photos ? JSON.parse(cached.photos) : null,
+            // SQLite stores include_in_report as INTEGER (0/1/null) — the
+            // type expects boolean | null; coerce so the spread doesn't
+            // leak the int into HabitatPolygon.
+            include_in_report:
+              cached.include_in_report == null ? null : cached.include_in_report === 1,
           });
         }
       }
+
+      // Photos come from the canonical photos table (habitat_polygon_id
+      // FK) — habitat_polygons.photos text[] is legacy and may be stale
+      // relative to what was uploaded most recently. Offline path leaves
+      // photoUrls empty; the section just disappears, which is the right
+      // behaviour for read-only.
+      try {
+        const { data: photoRows, error: photoErr } = await supabase
+          .from("photos")
+          .select("storage_path, watermarked_path, created_at")
+          .eq("habitat_polygon_id", habitatId)
+          .order("created_at", { ascending: false });
+        if (photoErr) throw photoErr;
+        if (photoRows) setPhotoUrls(photoRows.map(buildPhotoUrl));
+      } catch { /* offline or RLS denial — silently hide gallery */ }
+
       setLoading(false);
     };
     fetch();
@@ -73,7 +118,9 @@ export default function HabitatDetailScreen() {
   }
 
   const cond = habitat.condition ? conditionColors[habitat.condition] : null;
-  const fossittColor = getFossittColor(habitat.fossitt_code);
+  const hasCode = !!habitat.fossitt_code;
+  const fossittColor = hasCode ? getFossittColor(habitat.fossitt_code) : UNCLASSIFIED_HABITAT_COLOR;
+  const codeLabel = hasCode ? habitat.fossitt_code : "Unclassified";
 
   return (
     <>
@@ -96,12 +143,12 @@ export default function HabitatDetailScreen() {
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         <View style={styles.card}>
           <View style={styles.headerRow}>
-            {habitat.fossitt_code && (
-              <View style={[styles.codeBadge, { backgroundColor: fossittColor + "22", borderColor: fossittColor + "55" }]}>
-                <Text style={[styles.codeText, { color: fossittColor }]}>{habitat.fossitt_code}</Text>
-              </View>
-            )}
-            <Text style={styles.title}>{habitat.fossitt_name ?? "Unknown"}</Text>
+            <View style={[styles.codeBadge, { backgroundColor: fossittColor + "22", borderColor: fossittColor + "55" }]}>
+              <Text style={[styles.codeText, { color: fossittColor }]}>{codeLabel}</Text>
+            </View>
+            <Text style={styles.title}>
+              {habitat.fossitt_name ?? (hasCode ? "Unknown" : "Unmapped polygon")}
+            </Text>
           </View>
 
           <View style={styles.tags}>
@@ -165,12 +212,39 @@ export default function HabitatDetailScreen() {
           </View>
         )}
 
-        {habitat.photos && habitat.photos.length > 0 && (
+        {photoUrls.length > 0 && (
           <View style={styles.card}>
-            <Text style={styles.sectionLabel}>Photos ({habitat.photos.length})</Text>
-            <PhotoViewer photos={habitat.photos} imageWidth={imageWidth} />
+            <Text style={styles.sectionLabel}>Photos ({photoUrls.length})</Text>
+            <PhotoViewer photos={photoUrls} imageWidth={imageWidth} />
           </View>
         )}
+
+        {/* Map shortcut. Mobile habitat detail keeps the rich screen
+            (photos, threats, listed species) — taking the user back to
+            the map screen is a separate intent, so it lives as an
+            explicit button rather than auto-fly-to on every detail open.
+            The map screen toggles the Habitats layer on if it's off (see
+            map screen handler) so the polygon is guaranteed visible. */}
+        <TouchableOpacity
+          style={styles.mapButton}
+          activeOpacity={0.7}
+          onPress={() => {
+            // focusHabitatId tells the map to flip the Habitats layer on
+            // (overriding a persisted "off" pref for this open) and to
+            // fly-to the polygon. siteId narrows the picker if the
+            // habitat belongs to a specific site so the polygon is in the
+            // initial viewport instead of being filtered out.
+            const params: Record<string, string> = { focusHabitatId: habitat.id };
+            if (habitat.site_id) params.siteId = habitat.site_id;
+            router.push({
+              pathname: `/project/${habitat.project_id}/map`,
+              params,
+            });
+          }}
+        >
+          <Ionicons name="map-outline" size={20} color={colors.white} />
+          <Text style={styles.mapButtonText}>Show on Map</Text>
+        </TouchableOpacity>
       </ScrollView>
     </>
   );
@@ -228,4 +302,20 @@ const styles = StyleSheet.create({
   listItem: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 8 },
   bullet: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.text.body },
   listText: { fontSize: 16, color: colors.text.heading },
+  mapButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: colors.primary.DEFAULT,
+    borderRadius: 14,
+    paddingVertical: 16,
+    marginTop: 8,
+    minHeight: 52,
+  },
+  mapButtonText: {
+    color: colors.white,
+    fontSize: 17,
+    fontWeight: "600",
+  },
 });
