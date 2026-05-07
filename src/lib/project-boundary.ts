@@ -3,9 +3,9 @@ import { setCachedProjectBoundary, getCachedProjectBoundary } from "@/lib/databa
 import { useNetworkStore } from "@/lib/network";
 
 /**
- * Mobile shape produced from web's RPC payloads. We deliberately drop
- * buffer_distances and visible_layers (analysis features web Step 5
- * uses; out of scope for the read-only orientation view).
+ * Mobile shape produced from web's RPC payloads. visible_layers is still
+ * dropped (web Step 5 analysis feature, not used here); buffer_distances
+ * is carried through so the map can draw the same ring overlays as web.
  */
 export interface ProjectBoundary {
   /** Polygon Feature from get_project_with_geojson — Feature wrapper. */
@@ -22,6 +22,9 @@ export interface ProjectBoundarySite {
   sort_order: number | null;
   boundary: GeoJsonPolygon | null;
   center_point: GeoJsonPoint | null;
+  /** km, ascending. null when site has no buffers configured — caller
+   *  should fall back to DEFAULT_BUFFER_DISTANCES from buffer-zones. */
+  buffer_distances: number[] | null;
 }
 
 export interface GeoJsonPoint {
@@ -53,6 +56,7 @@ interface RpcSiteResponse {
   sort_order: number | null;
   boundary: GeoJsonPolygon | null;
   center_point: GeoJsonPoint | null;
+  buffer_distances: number[] | null;
 }
 
 function emptyBoundary(): ProjectBoundary {
@@ -92,6 +96,7 @@ function siteFromRpc(s: RpcSiteResponse): ProjectBoundarySite {
     sort_order: s.sort_order,
     boundary: s.boundary ?? null,
     center_point: s.center_point ?? null,
+    buffer_distances: Array.isArray(s.buffer_distances) ? s.buffer_distances : null,
   };
 }
 

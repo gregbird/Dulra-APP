@@ -11,6 +11,7 @@
   "dependencies": {
     "@react-native-community/netinfo": "11.4.1",
     "@supabase/supabase-js": "^2.99.2",
+    "@turf/buffer": "^7.3.5",
     "drizzle-orm": "^0.45.1",
     "expo": "^54.0.33",
     "expo-camera": "~17.0.10",

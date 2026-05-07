@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Dimensions,
   Modal,
   Platform,
   Pressable,
@@ -10,7 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Polygon, PROVIDER_DEFAULT, UrlTile } from "react-native-maps";
+import MapView, { Polygon, PROVIDER_DEFAULT, UrlTile, type Region } from "react-native-maps";
 import { Paths } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -22,8 +23,15 @@ import {
   fetchProjectBoundary,
   flattenBoundaryCoordinates,
   polygonToCoordinates,
+  type GeoJsonPolygon,
   type ProjectBoundary,
 } from "@/lib/project-boundary";
+import {
+  getBufferColor,
+  resolveBufferDistances,
+  ringPolygons,
+  sortBufferDistances,
+} from "@/lib/buffer-zones";
 import {
   fetchDesignatedSites,
   polygonsForRender,
@@ -32,19 +40,63 @@ import {
   designatedCacheKey,
   type DesignatedSite,
 } from "@/lib/designated-sites";
+import {
+  BASE_MAPS,
+  DEFAULT_BASE_MAP,
+  loadMapLayerPrefs,
+  resolveTileCachePath,
+  resolveTileUrl,
+  saveBaseMapPref,
+  saveTownlandsPref,
+  type BaseMapId,
+} from "@/lib/map-layers";
+import {
+  approximateZoom,
+  bboxesRoughlyEqual,
+  fetchTownlands,
+  MIN_TOWNLANDS_ZOOM,
+  townlandPieces,
+  type TownlandFeature,
+  type TownlandsBbox,
+} from "@/lib/townlands";
+import MapLayersControl from "@/components/map-layers-control";
+import TownlandDetailModal from "@/components/townland-detail-modal";
 import SitePicker from "@/components/site-picker";
 import type { ProjectSite } from "@/types/project";
 
 const FIT_PADDING = { top: 80, right: 60, bottom: 120, left: 60 };
 
-// ESRI World Imagery — free, key-free, matches web's satellite style.
-const SATELLITE_TILE_URL =
-  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
-
 // Same path the preview uses — both screens share the same on-disk cache,
 // so a tile fetched from the preview is reused fullscreen and vice versa.
 const TILE_CACHE_PATH = `${Paths.cache.uri}map-tiles`;
 const TILE_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+
+const TOWNLANDS_STROKE = "#a855f7";
+
+// Stacking order for overlays. Android Google Maps draws by zIndex (default
+// 0 = undefined order between overlays at same level), so without explicit
+// values a UrlTile prop change would let the tile render above polygons —
+// causing the symptom where designated sites disappear and only flicker
+// during zoom (when tiles are mid-refresh). iOS ignores Polygon/UrlTile
+// zIndex; there it relies on add-order (MKOverlayLevelAboveLabels).
+const Z_BASE_TILE = 0;
+const Z_OVERLAY_TILE = 5;
+const Z_SITE_POLYGON = 10;
+const Z_DESIGNATED = 20;
+const Z_BUFFER_RING = 30;
+const Z_TOWNLAND = 40;
+
+// `mapType` stays constant regardless of the chosen base map — same value
+// the preview screen uses (`satellite` on iOS, `none` on Android). Earlier
+// we toggled it per source for iOS so non-satellite bases got Apple's
+// standard map underneath, but swapping MKMapView's mapType at runtime
+// reseats the base renderer and the surrounding overlays' z-order goes
+// with it: designated polygons end up under the new tile and only flicker
+// back when a pan/zoom forces a full redraw. Keeping mapType frozen means
+// the only thing that changes on a base-map switch is the UrlTile's
+// `urlTemplate`/`tileCachePath`, which is enough to repaint the tile
+// without disturbing the polygon stack above it. `shouldReplaceMapContent`
+// hides the iOS satellite base where our tile has loaded.
 
 export default function ProjectMapScreen() {
   const { id, siteId: initialSiteId } = useLocalSearchParams<{ id: string; siteId?: string }>();
@@ -60,6 +112,35 @@ export default function ProjectMapScreen() {
   // Re-fetch on offline→online so a placeholder lands on a real boundary
   // when connectivity returns. Same pattern as ProjectBoundaryPreview.
   const isOnline = useNetworkStore((s) => s.isOnline);
+
+  // Layer state — base map + Townlands overlay. Defaults match the
+  // historical look (satellite, no overlay) so an empty pref store doesn't
+  // change behaviour for existing users; loadMapLayerPrefs hydrates from
+  // SQLite asynchronously and may flip the values once it resolves.
+  const [baseMap, setBaseMap] = useState<BaseMapId>(DEFAULT_BASE_MAP);
+  const [townlandsEnabled, setTownlandsEnabled] = useState(false);
+  const [layersOpen, setLayersOpen] = useState(false);
+  const [townlands, setTownlands] = useState<TownlandFeature[]>([]);
+  const [selectedTownland, setSelectedTownland] = useState<TownlandFeature | null>(null);
+  const lastTownlandBbox = useRef<TownlandsBbox | null>(null);
+  // Latest region cached so the toggle effect can fire an immediate fetch
+  // without waiting for the user to pan again.
+  const lastRegion = useRef<Region | null>(null);
+  const townlandFetchSeq = useRef(0);
+
+  // Hydrate persisted layer prefs once on mount. Failure is non-fatal;
+  // loadMapLayerPrefs swallows errors and returns sane defaults.
+  useEffect(() => {
+    let cancelled = false;
+    loadMapLayerPrefs().then((prefs) => {
+      if (cancelled) return;
+      setBaseMap(prefs.baseMap);
+      setTownlandsEnabled(prefs.townlandsEnabled);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const baseMapConfig = BASE_MAPS[baseMap];
 
   // Pull boundary geometry + project metadata + site list. Sites come from
   // a separate cached table (used by SitePicker in project-detail too) so we
@@ -155,6 +236,124 @@ export default function ProjectMapScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, selectedSiteId]);
 
+  // Townlands fetch driver. Triggered by region changes (onRegionChangeComplete)
+  // and by the toggle going on. The toggle path reuses the last region so the
+  // overlay paints in immediately if the user is already zoomed in.
+  const refreshTownlands = (region: Region | null) => {
+    if (!townlandsEnabled || !region) return;
+    const screenWidth = Dimensions.get("window").width;
+    const zoom = approximateZoom(region.longitudeDelta, screenWidth);
+    if (zoom < MIN_TOWNLANDS_ZOOM) {
+      // Too zoomed out — Ireland has ~51k townlands, never fetch the lot.
+      // Drop any previous render too so the user doesn't see a stale overlay
+      // floating over a continental view after panning out.
+      if (townlands.length > 0) setTownlands([]);
+      lastTownlandBbox.current = null;
+      return;
+    }
+    const bbox: TownlandsBbox = {
+      minLng: region.longitude - region.longitudeDelta / 2,
+      minLat: region.latitude - region.latitudeDelta / 2,
+      maxLng: region.longitude + region.longitudeDelta / 2,
+      maxLat: region.latitude + region.latitudeDelta / 2,
+    };
+    if (bboxesRoughlyEqual(lastTownlandBbox.current, bbox)) return;
+    lastTownlandBbox.current = bbox;
+    const seq = ++townlandFetchSeq.current;
+    fetchTownlands(bbox).then((features) => {
+      // Drop stale responses — a faster pan after this fetch started would
+      // otherwise let an out-of-date result clobber the current view.
+      if (seq !== townlandFetchSeq.current) return;
+      setTownlands(features);
+    });
+  };
+
+  const handleRegionChangeComplete = (region: Region) => {
+    lastRegion.current = region;
+    refreshTownlands(region);
+  };
+
+  // Toggle effect: fire a fetch immediately when townlands turn on (so the
+  // user doesn't have to nudge the map), and clear state when they turn off.
+  useEffect(() => {
+    if (!townlandsEnabled) {
+      setTownlands([]);
+      setSelectedTownland(null);
+      lastTownlandBbox.current = null;
+      townlandFetchSeq.current++;
+      return;
+    }
+    refreshTownlands(lastRegion.current);
+    // refreshTownlands closes over townlandsEnabled and townlands — only
+    // re-run when the toggle flips. Region-change driven fetches handle the
+    // pan/zoom case.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [townlandsEnabled]);
+
+  const handleSelectBaseMap = (id: BaseMapId) => {
+    setBaseMap(id);
+    setLayersOpen(false);
+    saveBaseMapPref(id);
+  };
+
+  const handleToggleTownlands = (enabled: boolean) => {
+    setTownlandsEnabled(enabled);
+    saveTownlandsPref(enabled);
+  };
+
+  // Buffer rings around each site, matching the web map. Each site carries
+  // its own buffer_distances (km); when null we fall back to the shared
+  // [2, 5] default so an unconfigured project still gives the surveyor
+  // proximity context. Rings sort large→small so the painter draws the
+  // bigger halo underneath, and we re-buffer only when the boundary or
+  // selection changes — turf.buffer is pure-JS but heavy enough that we
+  // don't want it firing on every pan.
+  const bufferRings = useMemo(() => {
+    if (!data) return [];
+    const rings: Array<{
+      key: string;
+      coords: Array<{ latitude: number; longitude: number }>;
+      color: string;
+    }> = [];
+
+    const addRingsFor = (
+      boundary: GeoJsonPolygon | null,
+      distances: number[] | null,
+      idPrefix: string,
+    ) => {
+      if (!boundary) return;
+      const ordered = sortBufferDistances(resolveBufferDistances(distances));
+      for (const km of ordered) {
+        const polys = ringPolygons(boundary, km);
+        polys.forEach((poly, idx) => {
+          const coords = polygonToCoordinates(poly);
+          if (coords.length === 0) return;
+          rings.push({
+            key: `${idPrefix}-${km}-${idx}`,
+            coords,
+            color: getBufferColor(km),
+          });
+        });
+      }
+    };
+
+    if (data.sites.length > 0) {
+      // "All Sites" mode rings every site; selecting a single site narrows
+      // to its rings only — the surveyor's focus is on that polygon, and
+      // unrelated halos around the others would be visual noise.
+      for (const site of data.sites) {
+        if (selectedSiteId && site.id !== selectedSiteId) continue;
+        addRingsFor(site.boundary, site.buffer_distances, `buf-${site.id}`);
+      }
+    } else if (data.projectBoundary?.geometry) {
+      // Site-less project: ring the project boundary with the default
+      // distances. We don't carry projects.buffer_distances through the
+      // RPC yet, so the default is the only signal here.
+      addRingsFor(data.projectBoundary.geometry, null, "buf-project");
+    }
+    return rings;
+  }, [data, selectedSiteId]);
+
   const hasGeometry = data ? flattenBoundaryCoordinates(data).length > 0 : false;
 
   return (
@@ -204,45 +403,76 @@ export default function ProjectMapScreen() {
               ref={mapRef}
               style={styles.map}
               provider={PROVIDER_DEFAULT}
-              // Same tile matrix as ProjectBoundaryPreview. shouldReplaceMapContent
-              // on iOS prevents the underlying Apple satellite base from being
-              // drawn under our ESRI tiles (perf win during pan). The base
-              // still kicks in transparently when ESRI hasn't loaded a region.
+              // Frozen across base-map switches — see the comment near the
+              // top of this file for why toggling mapType broke the polygon
+              // z-order.
               mapType={Platform.OS === "android" ? "none" : "satellite"}
               showsUserLocation
               showsMyLocationButton
               toolbarEnabled={false}
               onMapReady={handleMapReady}
+              onRegionChangeComplete={handleRegionChangeComplete}
             >
+              {/* Base + overlay tiles AND every polygon below carry baseMap
+                  in their key. Without this, remounting only the UrlTile on
+                  switch makes MKMapView append the new tile to the END of
+                  its overlays array, hiding polygons that were added
+                  earlier. Remounting both together restores add-order:
+                  tile re-enters first, polygons re-enter after, polygons
+                  end up on top — same outcome web gets for free via
+                  Leaflet's overlayPane. Cost is a single-frame flicker on
+                  switch, which is the trade-off the web team's brief
+                  explicitly accepts. zIndex props stay for Android Google
+                  Maps where they're respected; iOS ignores them, so the
+                  add-order pattern is what carries the day there. */}
               <UrlTile
-                urlTemplate={SATELLITE_TILE_URL}
-                maximumZ={19}
+                key={`base-${baseMap}`}
+                urlTemplate={resolveTileUrl(baseMapConfig.base)}
+                maximumZ={baseMapConfig.base.maxZoom}
                 flipY={false}
                 shouldReplaceMapContent
-                tileCachePath={TILE_CACHE_PATH}
+                tileCachePath={resolveTileCachePath(TILE_CACHE_PATH, baseMapConfig.base)}
                 tileCacheMaxAge={TILE_CACHE_MAX_AGE_SECONDS}
+                zIndex={Z_BASE_TILE}
               />
+              {/* Optional overlay (Hybrid uses ESRI's labels layer over its
+                  imagery). shouldReplaceMapContent stays false — we *want*
+                  the satellite below to keep painting. */}
+              {baseMapConfig.overlay && (
+                <UrlTile
+                  key={`overlay-${baseMap}`}
+                  urlTemplate={resolveTileUrl(baseMapConfig.overlay)}
+                  maximumZ={baseMapConfig.overlay.maxZoom}
+                  flipY={false}
+                  tileCachePath={resolveTileCachePath(TILE_CACHE_PATH, baseMapConfig.overlay)}
+                  tileCacheMaxAge={TILE_CACHE_MAX_AGE_SECONDS}
+                  zIndex={Z_OVERLAY_TILE}
+                />
+              )}
               {data?.sites.map((site) => {
                 const coords = polygonToCoordinates(site.boundary);
                 if (coords.length === 0) return null;
                 const isPrimary = selectedSiteId === null || site.id === selectedSiteId;
                 return (
                   <Polygon
-                    key={site.id}
+                    key={`${baseMap}-${site.id}`}
                     coordinates={coords}
                     strokeColor={isPrimary ? colors.primary.DEFAULT : "#94a3b8"}
                     strokeWidth={isPrimary ? 3 : 1.5}
                     fillColor={isPrimary ? colors.primary.DEFAULT + "33" : "transparent"}
+                    zIndex={Z_SITE_POLYGON}
                   />
                 );
               })}
               {/* Project-level boundary fallback when no site polygons exist. */}
               {data && data.sites.length === 0 && data.projectBoundary?.geometry && (
                 <Polygon
+                  key={`${baseMap}-boundary`}
                   coordinates={polygonToCoordinates(data.projectBoundary.geometry)}
                   strokeColor={colors.primary.DEFAULT}
                   strokeWidth={3}
                   fillColor={colors.primary.DEFAULT + "33"}
+                  zIndex={Z_SITE_POLYGON}
                 />
               )}
 
@@ -257,7 +487,7 @@ export default function ProjectMapScreen() {
                 const colour = getDesignatedSiteColor(site.site_type);
                 return pieces.map((piece, idx) => (
                   <Polygon
-                    key={`${designatedCacheKey(site)}-${idx}`}
+                    key={`${baseMap}-${designatedCacheKey(site)}-${idx}`}
                     coordinates={piece.outer}
                     holes={piece.holes.length > 0 ? piece.holes : undefined}
                     strokeColor={colour}
@@ -265,10 +495,61 @@ export default function ProjectMapScreen() {
                     fillColor={`${colour}40`}
                     tappable
                     onPress={() => setSelectedDesignated(site)}
+                    zIndex={Z_DESIGNATED}
+                  />
+                ));
+              })}
+
+              {/* Buffer rings. Painted after designated sites (per parity
+                  with web) so the dashed outline reads cleanly over NPWS
+                  fills. Fill is at ~5% alpha (0x0D) and the stroke uses
+                  lineDashPattern so concentric rings stay distinguishable
+                  even when they overlap. */}
+              {bufferRings.map((ring) => (
+                <Polygon
+                  key={`${baseMap}-${ring.key}`}
+                  coordinates={ring.coords}
+                  strokeColor={ring.color}
+                  strokeWidth={2}
+                  fillColor={`${ring.color}0D`}
+                  lineDashPattern={[5, 5]}
+                  zIndex={Z_BUFFER_RING}
+                />
+              ))}
+
+              {/* Townlands overlay. Drawn after designated sites so the
+                  thin purple outlines remain visible across both light
+                  imagery and dark vector bases. Fill stays transparent —
+                  ~51k polygons of any solid colour would obliterate the
+                  underlying map at typical zooms. */}
+              {townlandsEnabled && townlands.map((feature) => {
+                const pieces = townlandPieces(feature);
+                if (pieces.length === 0) return null;
+                return pieces.map((piece, idx) => (
+                  <Polygon
+                    key={`${baseMap}-townland-${feature.id}-${idx}`}
+                    coordinates={piece.outer}
+                    holes={piece.holes.length > 0 ? piece.holes : undefined}
+                    strokeColor={TOWNLANDS_STROKE}
+                    strokeWidth={1.5}
+                    fillColor="transparent"
+                    tappable
+                    onPress={() => setSelectedTownland(feature)}
+                    zIndex={Z_TOWNLAND}
                   />
                 ));
               })}
             </MapView>
+
+            <MapLayersControl
+              baseMap={baseMap}
+              onSelectBaseMap={handleSelectBaseMap}
+              townlandsEnabled={townlandsEnabled}
+              onToggleTownlands={handleToggleTownlands}
+              visible={layersOpen}
+              onOpen={() => setLayersOpen(true)}
+              onClose={() => setLayersOpen(false)}
+            />
 
             {designated.length > 0 && (
               <View style={styles.legendWrap} pointerEvents="none">
@@ -292,6 +573,10 @@ export default function ProjectMapScreen() {
         <DesignatedDetailModal
           site={selectedDesignated}
           onClose={() => setSelectedDesignated(null)}
+        />
+        <TownlandDetailModal
+          feature={selectedTownland}
+          onClose={() => setSelectedTownland(null)}
         />
       </View>
     </>

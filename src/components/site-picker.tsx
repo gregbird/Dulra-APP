@@ -33,7 +33,6 @@ export default function SitePicker({ sites, selectedSiteId, onSelect }: SitePick
 
   return (
     <View style={styles.wrapper}>
-      <Text style={styles.label}>Site</Text>
       <TouchableOpacity
         style={styles.selector}
         activeOpacity={0.7}
@@ -96,12 +95,6 @@ export default function SitePicker({ sites, selectedSiteId, onSelect }: SitePick
 const styles = StyleSheet.create({
   wrapper: {
     marginTop: 14,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: "500",
-    color: colors.text.body,
-    marginBottom: 6,
   },
   selector: {
     flexDirection: "row",
