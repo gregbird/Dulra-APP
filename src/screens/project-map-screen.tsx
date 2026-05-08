@@ -448,16 +448,15 @@ export default function ProjectMapScreen() {
     if (currentZoom == null) return "none";
     if (currentZoom < MIN_HABITAT_RENDER_ZOOM) return "none";
     if (currentZoom < MIN_NLC_RENDER_ZOOM) return "habitats";
-    // z >= 16: NLC takes over. With NLC disabled we render NOTHING
-    // — falling back to the saved-habitat layer here surfaces its
-    // 5 m server-side simplification as visible TIN-style triangle
-    // segments at this zoom (saved habitat geometry is smoothed for
-    // overview, not parcel-level inspection). User intent for
-    // turning NLC off at high zoom is "no reference clutter"; we
-    // honour that literally. They can zoom out below 16 to see
-    // saved habitats, or turn NLC back on for the high-quality
-    // reference layer.
-    return nlcEnabled ? "nlc" : "none";
+    // z >= 16: NLC takes over when its toggle is on; otherwise we
+    // continue showing the saved-habitat layer so the user's own
+    // data stays visible at high zoom. Saved habitats at this zoom
+    // surface their 5 m server-side simplification as visible
+    // angular segments — that's the "triangle artifact" surveyors
+    // report. The proper fix requires a backend tolerance
+    // parameter on get_habitats_in_bbox (web team to action), not
+    // hiding the layer here.
+    return nlcEnabled ? "nlc" : "habitats";
   }, [habitatsEnabled, nlcEnabled, currentZoom]);
 
   // Skip viewport-driven fetches during the initial fitToCoordinates
