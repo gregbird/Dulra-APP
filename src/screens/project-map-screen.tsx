@@ -22,6 +22,7 @@ import { getCachedProjects, getCachedProjectSites } from "@/lib/database";
 import {
   fetchProjectBoundary,
   flattenBoundaryCoordinates,
+  getMemoryProjectBoundary,
   polygonToCoordinates,
   type GeoJsonPolygon,
   type ProjectBoundary,
@@ -39,11 +40,24 @@ import {
   getDesignatedSiteDisplayName,
   designatedCacheKey,
   type DesignatedSite,
+  type RenderPiece as DesignatedRenderPiece,
 } from "@/lib/designated-sites";
 import {
+  fetchHabitatsInBbox,
   fetchProjectHabitats,
+  getHabitatsForProject,
   habitatPolygonPieces,
+  habitatBboxSpanDegrees,
+  habitatGeometryBbox,
+  bboxFromCoords,
+  bboxesIntersect,
+  expandBboxByMeters,
+  bboxAreaKm2,
+  bboxesEqualish,
   darkenHex,
+  invalidateHabitatsMemoryCache,
+  type HabitatBbox,
+  type HabitatRenderPiece,
 } from "@/lib/habitats";
 import { getFossittColor } from "@/lib/fossitt-utils";
 import { UNCLASSIFIED_HABITAT_COLOR, type HabitatPolygon } from "@/types/habitat";
@@ -82,6 +96,69 @@ const TILE_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
 const TOWNLANDS_STROKE = "#a855f7";
 
+// Habitat polygons smaller than this many screen pixels at the current
+// zoom are skipped — they're invisible noise but each one still costs a
+// native overlay add through the react-native-maps bridge. 6 px is the
+// smallest a stroke + fill remain readable on a typical handset; below
+// it the user can't distinguish individual polygons anyway.
+const MIN_HABITAT_PIXELS = 6;
+const SCREEN_WIDTH = Dimensions.get("window").width;
+
+// Aggressive iOS diagnostic mode — earlier rounds with cap=100 + 64-vertex
+// decimation still froze. We're now deliberately well below any plausible
+// MKMapView ceiling so a continued freeze proves the bottleneck is *not*
+// polygon mount (and we can stop chasing that lead). Android stays loose
+// because Google Maps batches overlay adds natively.
+const MAX_HABITAT_POLYGONS = Platform.OS === "ios" ? 20 : 500;
+const MAX_VERTICES_PER_RING = Platform.OS === "ios" ? 32 : undefined;
+// On iOS we also drop holes (donut shapes become solid fills) and
+// tappable hit-tests for habitats. Hit-test region construction scales
+// with vertex count and overlay count — disabling it cuts a chunk of
+// MKMapView's per-overlay setup. The detail sheet is still reachable
+// from the Habitats list tab, so this is a measured trade, not a feature
+// loss.
+const HABITAT_TAPPABLE = Platform.OS !== "ios";
+const HABITAT_RENDER_HOLES = Platform.OS !== "ios";
+
+// Spec § 4: when the visible viewport bbox covers more than 50 km² we
+// skip the fetch and surface a "zoom in" hint. PostGIS would still cope
+// at the server but the result set would re-introduce the very problem
+// viewport loading exists to prevent — too many native overlays at once.
+const VIEWPORT_AREA_LIMIT_KM2 = 50;
+
+// 100 m skirt around the focus geometry on first open. Spec default —
+// gives the surveyor a small bleed of habitats just outside the site
+// boundary so they can spot edge-of-site features without panning.
+const INITIAL_BBOX_BUFFER_METERS = 100;
+
+// Pan/zoom debounce. Long enough that an inertial swipe settles into a
+// single fetch, short enough that the user perceives the result as
+// "live" with their interaction.
+const VIEWPORT_FETCH_DEBOUNCE_MS = 400;
+
+// Vertex cap for designated (NPWS) site polygons. Geometry comes
+// pre-simplified at ~11 m server-side per the lib/designated-sites
+// note, but a single SAC can still ship ~5000 vertices when its
+// geometry is genuinely complex (e.g. estuarine sites). Same iOS
+// bridge cost equation as habitats: vertex count dominates.
+const DESIGNATED_MAX_VERTICES_PER_RING = Platform.OS === "ios" ? 96 : undefined;
+
+// Final overlay cap for designated polygons (post-MultiPolygon split).
+// Outlier projects sit near 50+ NPWS sites with several pieces each;
+// without a cap that's hundreds of MKPolygons mounting alongside the
+// habitat layer at fitToCoordinates time, which is the bulk of the
+// "open project, frozen for 15 s" report.
+const MAX_DESIGNATED_POLYGONS = Platform.OS === "ios" ? 25 : 200;
+
+// Minimum camera zoom level before any habitat polygon is rendered.
+// Roughly: zoom 14 ≈ city block, 15 ≈ small parcels, 16 ≈ individual
+// buildings. Surveyors care about polygon detail at parcel scale, not
+// at "I can see the whole town" scale, and rendering even a few stray
+// polygons at low zoom feels like noise. Below this threshold the
+// layer paints nothing — the size-cull below would still drop most of
+// them but a hard floor is clearer to the user. Tunable.
+const MIN_HABITAT_RENDER_ZOOM = 14;
+
 // Stacking order for overlays. Android Google Maps draws by zIndex (default
 // 0 = undefined order between overlays at same level), so without explicit
 // values a UrlTile prop change would let the tile render above polygons —
@@ -119,13 +196,19 @@ export default function ProjectMapScreen() {
     focusHabitatId?: string;
   }>();
   const router = useRouter();
-  const [data, setData] = useState<ProjectBoundary | null>(null);
+  // Hydrate from the module-level boundary cache if the preview map (or
+  // a previous mount of this screen) already fetched the project's
+  // boundary. With a hot cache the spinner never shows — the MapView
+  // renders during the navigation transition and the camera is fitted
+  // immediately. Cold cache falls back to the loading flow.
+  const cachedBoundary = id ? getMemoryProjectBoundary(id) : null;
+  const [data, setData] = useState<ProjectBoundary | null>(cachedBoundary);
   const [designated, setDesignated] = useState<DesignatedSite[]>([]);
   const [selectedDesignated, setSelectedDesignated] = useState<DesignatedSite | null>(null);
   const [sites, setSites] = useState<ProjectSite[]>([]);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(initialSiteId ?? null);
   const [projectName, setProjectName] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(cachedBoundary == null);
   const mapRef = useRef<MapView>(null);
   // Re-fetch on offline→online so a placeholder lands on a real boundary
   // when connectivity returns. Same pattern as ProjectBoundaryPreview.
@@ -140,6 +223,18 @@ export default function ProjectMapScreen() {
   const [habitatsEnabled, setHabitatsEnabled] = useState(false);
   const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
   const [selectedHabitat, setSelectedHabitat] = useState<HabitatPolygon | null>(null);
+  // Live zoom span in degrees (the camera's longitudeDelta), updated only
+  // on significant zoom changes — see handleRegionChangeComplete. Drives
+  // the skip-when-tiny cull below. Null until the first regionChange
+  // fires; the effective threshold falls back to a project-bbox-derived
+  // initial estimate so the cull applies on first mount.
+  const [zoomLngDelta, setZoomLngDelta] = useState<number | null>(null);
+  // IDs of habitat polygons currently mounted on the map. Grown over
+  // multiple animation frames — see the progressive-mount effect — so
+  // adding hundreds of native overlays through the react-native-maps
+  // bridge doesn't block the JS thread for tens of seconds at once. The
+  // map appears almost immediately and polygons paint in over ~1-2 s
+  // while the user can already pan, tap the layers FAB, or pick sites.
   const [layersOpen, setLayersOpen] = useState(false);
   const [townlands, setTownlands] = useState<TownlandFeature[]>([]);
   const [selectedTownland, setSelectedTownland] = useState<TownlandFeature | null>(null);
@@ -162,20 +257,201 @@ export default function ProjectMapScreen() {
     return () => { cancelled = true; };
   }, []);
 
-  // Habitat polygons. Lazy-fetched once per project per session — same
-  // rationale as fetchDesignatedSites (geometry payload too heavy for the
-  // post-login warm pass on multi-project accounts). Fires regardless of
-  // the toggle so flipping it on doesn't introduce a fetch delay; render
-  // is gated on habitatsEnabled below. isOnline drives a refetch when
-  // connectivity returns so a placeholder cache lands on real data.
+  // setTimeout-driven mount budget. The earlier requestAnimationFrame
+  // version scheduled each tick before the next paint — but on iOS the
+  // bridge commit for a single MKPolygon can take 100-300 ms, which
+  // collides with the next rAF firing immediately. The result was a
+  // tight loop where the JS thread was always either committing or
+  // about to commit, with no real idle window for gesture events to
+  // process. setTimeout(POLYGON_MOUNT_INTERVAL_MS) interleaves a hard
+  // pause every tick — gestures get a guaranteed slot.
+  //
+  // Pacing: 50 ms × ~140 polygons = ~7 s total mount time worst-case.
+  // The map is interactive from the first frame; polygons stream in
+  // at a visibly progressive but not-jarring rate.
+  const POLYGON_MOUNT_INTERVAL_MS = 50;
+  const [polygonMountBudget, setPolygonMountBudget] = useState(0);
+  const polygonMountTarget = MAX_HABITAT_POLYGONS + MAX_DESIGNATED_POLYGONS;
+  useEffect(() => {
+    if (polygonMountBudget >= polygonMountTarget) return;
+    const handle = setTimeout(() => {
+      setPolygonMountBudget((b) => Math.min(b + 1, polygonMountTarget));
+    }, POLYGON_MOUNT_INTERVAL_MS);
+    return () => clearTimeout(handle);
+  }, [polygonMountBudget, polygonMountTarget]);
+
+  // Diagnostic — fires at key lifecycle moments so we can finally pin
+  // down where the freeze comes from with measurements instead of
+  // guesses. Removed once perf is stable.
+  const mountStartRef = useRef<number>(Date.now());
+  useEffect(() => {
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.log(`[map] mount t=0`);
+    }
+  }, []);
+  useEffect(() => {
+    if (__DEV__ && data) {
+      // eslint-disable-next-line no-console
+      console.log(`[map] data ready t=${Date.now() - mountStartRef.current}ms`);
+    }
+  }, [data]);
+  useEffect(() => {
+    if (__DEV__ && designated.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[map] designated arrived (${designated.length}) t=${Date.now() - mountStartRef.current}ms`,
+      );
+    }
+  }, [designated]);
+  useEffect(() => {
+    if (__DEV__ && polygonMountBudget > 0 && polygonMountBudget % 5 === 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[map] mount budget=${polygonMountBudget}/${polygonMountTarget} t=${Date.now() - mountStartRef.current}ms`,
+      );
+    }
+  }, [polygonMountBudget, polygonMountTarget]);
+
+  // Reset the project's accumulating habitat store on every fresh map
+  // mount. Across-session accumulation was producing the "open project,
+  // freezes for 2 minutes" symptom — earlier sessions panned across the
+  // project and merged dozens-to-hundreds of rows into the module
+  // store; the next session's first render had to push all of those
+  // through every memo (sortedHabitats, habitatBboxSizes,
+  // habitatFullBboxes) before any polygon could paint.
+  //
+  // Within a session the store still accumulates as the user pans, so
+  // returning to a previously-loaded area paints instantly. Across
+  // sessions / mounts we start fresh, which matches the spec's intent
+  // (default open = site/project + 100 m, not "everything ever loaded").
   useEffect(() => {
     if (!id) return;
-    let cancelled = false;
-    fetchProjectHabitats(id)
-      .then((rows) => { if (!cancelled) setHabitats(rows); })
-      .catch(() => { /* swallow — habitats layer is non-critical */ });
-    return () => { cancelled = true; };
-  }, [id, isOnline]);
+    invalidateHabitatsMemoryCache(id);
+    // Clear local mirror too — otherwise the previous mount's array
+    // would render briefly before the fresh fetch lands.
+    setHabitats([]);
+    // Run only on project change / fresh mount; don't re-clear on
+    // unrelated state changes within the session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Commit-time diagnostic — fires after React commits a render that
+  // changed `habitats`. If the bbox-fetch log appears but this one
+  // doesn't, the render itself is hanging (commit hasn't completed).
+  useEffect(() => {
+    if (__DEV__ && habitats.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[habitats] commit → habitats.length=${habitats.length}`);
+    }
+  }, [habitats]);
+
+  // Habitat polygons follow a viewport-loading model — see the spec at
+  // `docs/habitats-bbox-rpc-migration.sql.md`. There is no "fetch the
+  // whole project" path on this screen anymore; instead:
+  //
+  //   1. INITIAL FETCH (initialBboxFetchedRef effect below) — once the
+  //      project boundary loads, request habitats inside the focus
+  //      geometry + 100 m buffer. The user sees a small skirt of
+  //      polygons around the site they're starting on.
+  //
+  //   2. PAN/ZOOM (handleRegionChangeComplete debounced effect) — every
+  //      ~400 ms after the camera settles, request habitats inside the
+  //      visible viewport. Results merge into the module-level store
+  //      (id-based dedupe), so polygons the user has already seen stay
+  //      mounted as they pan onward.
+  //
+  //   3. ZOOM GUARD — viewport > VIEWPORT_AREA_LIMIT_KM2 → skip the
+  //      fetch and surface a banner. Prevents country-scale viewports
+  //      from re-introducing the "1000 polygons at once" failure mode.
+  //
+  // The local `habitats` state mirrors the module store after each
+  // fetch; we don't subscribe directly to the store because React
+  // doesn't observe Map mutations.
+  const [viewportTooLarge, setViewportTooLarge] = useState(false);
+
+  // (Initial site+100m fetch removed. The map opens at project fit-zoom
+  // which sits below MIN_HABITAT_RENDER_ZOOM, so any prefetch was
+  // wasted work — habitats wouldn't render at that zoom anyway, but
+  // the fetch + JSON parse + state cascade froze the JS thread for
+  // tens of seconds on cadastral-import projects. Habitats now load
+  // strictly on demand: when the user zooms in past the threshold,
+  // the viewport-driven fetch effect below picks up the next region
+  // change and pulls just what's on screen.)
+
+  // Viewport-driven fetch — fired by handleRegionChangeComplete via the
+  // pendingViewportBbox state. Debounced through a useEffect timer so
+  // fast pans coalesce into a single RPC. Zoom guard ducks the call
+  // when the viewport is too wide; the banner is wired off the same
+  // `viewportTooLarge` flag.
+  const [pendingViewportBbox, setPendingViewportBbox] = useState<HabitatBbox | null>(null);
+  const lastFetchedBboxRef = useRef<HabitatBbox | null>(null);
+  // Skip viewport-driven fetches during the initial fitToCoordinates
+  // animation (~1.5 s). iOS fires regionChangeComplete multiple times
+  // during the camera fit and each fire kicked off a fresh bbox RPC,
+  // producing the "6+ parallel fetches stacking on the JS thread" we
+  // saw in logs (42, 23, 22, 7, 17, 4, 39, 6 rows). Once the gate
+  // flips on, normal pan/zoom behaviour resumes.
+  const [viewportFetchUnlocked, setViewportFetchUnlocked] = useState(false);
+  useEffect(() => {
+    const handle = setTimeout(() => setViewportFetchUnlocked(true), 1500);
+    return () => clearTimeout(handle);
+  }, []);
+  useEffect(() => {
+    if (!id || !habitatsEnabled || !pendingViewportBbox || !viewportFetchUnlocked) return;
+    const bbox = pendingViewportBbox;
+    // Guard 0 (zoom floor): if the camera is below the render-zoom
+    // threshold there's nothing to draw anyway — and the fetch + JSON
+    // parse + memo cascade for hundreds of habitats would freeze the
+    // JS thread for nothing. Compute zoom directly from the bbox
+    // width — using `zoomLngDelta` state would miss this guard during
+    // the initial fit animation (state isn't set until a significant
+    // zoom change fires). bbox's own width is always accurate.
+    const bboxLngDelta = bbox.maxLng - bbox.minLng;
+    if (bboxLngDelta > 0) {
+      const zoom = approximateZoom(bboxLngDelta, SCREEN_WIDTH);
+      if (zoom < MIN_HABITAT_RENDER_ZOOM) {
+        setViewportTooLarge(true);
+        return;
+      }
+    }
+    // Guard 1: viewport too large → skip fetch, surface banner.
+    if (bboxAreaKm2(bbox) > VIEWPORT_AREA_LIMIT_KM2) {
+      setViewportTooLarge(true);
+      return;
+    }
+    setViewportTooLarge(false);
+    // Guard 2: same bbox we just fetched → no-op.
+    if (lastFetchedBboxRef.current && bboxesEqualish(lastFetchedBboxRef.current, bbox)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      lastFetchedBboxRef.current = bbox;
+      fetchHabitatsInBbox(id, selectedSiteId ?? null, bbox)
+        .then((rows) => setHabitats(rows))
+        .catch(() => { /* swallow */ });
+    }, VIEWPORT_FETCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [id, habitatsEnabled, selectedSiteId, pendingViewportBbox, viewportFetchUnlocked]);
+
+  // When the toggle flips off, clear any pending state but DO NOT clear
+  // the module store — the user may flip it back on and we want their
+  // accumulated polygons still there. The `habitats` state empties via
+  // habitatsEnabled in the visibleHabitats memo below.
+  useEffect(() => {
+    if (!habitatsEnabled) {
+      setViewportTooLarge(false);
+      setPendingViewportBbox(null);
+      lastFetchedBboxRef.current = null;
+    } else if (id) {
+      // When re-enabled, hydrate state from whatever the store already
+      // has for this project (e.g. from a prior session that called
+      // fetchHabitatsInBbox before the user toggled it off).
+      setHabitats(getHabitatsForProject(id, selectedSiteId ?? null));
+    }
+  }, [habitatsEnabled, id, selectedSiteId]);
 
   // Focus-from-detail flow: when the detail screen sends focusHabitatId,
   // force the layer on for this open (the user explicitly asked to see
@@ -186,6 +462,29 @@ export default function ProjectMapScreen() {
   useEffect(() => {
     if (focusHabitatId) setHabitatsEnabled(true);
   }, [focusHabitatId]);
+
+  // Focus fallback: if the requested polygon isn't inside the initial
+  // bbox (cadastral imports occasionally have rows that sit outside the
+  // project skirt), the focus effect below would never fire because
+  // `habitats` wouldn't contain the target. Detect that and run the
+  // explicit "Show all" fetch — this is a user-initiated jump from the
+  // detail screen, so paying for the legacy RPC once is the right call.
+  // Guarded so we only fall back once per focus id.
+  const focusFallbackFiredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!id || !focusHabitatId) return;
+    if (habitats.some((h) => h.id === focusHabitatId)) return;
+    if (focusFallbackFiredRef.current === focusHabitatId) return;
+    // We only enter this branch after the initial bbox fetch has had a
+    // chance to populate `habitats`. Empty array is fine — could mean
+    // the bbox call hasn't returned yet; we'd retry on the next render.
+    // To avoid a tight loop, we mark fired immediately and rely on the
+    // promise's setHabitats to re-render with the target.
+    focusFallbackFiredRef.current = focusHabitatId;
+    fetchProjectHabitats(id, selectedSiteId ?? null)
+      .then((rows) => setHabitats(rows))
+      .catch(() => { /* swallow — focus polygon might just not exist */ });
+  }, [id, focusHabitatId, habitats, selectedSiteId]);
 
   // Once the habitat list loads (and a focus id was requested), fit the
   // camera to that polygon and pop the bottom sheet. We only run this
@@ -341,8 +640,42 @@ export default function ProjectMapScreen() {
   };
 
   const handleRegionChangeComplete = (region: Region) => {
+    const prev = lastRegion.current;
     lastRegion.current = region;
     refreshTownlands(region);
+    // Push zoom into state only on a *significant* zoom change. Pure
+    // pans don't change which polygons are too small to render, and
+    // re-running the habitat filter for them would mean repeated
+    // bridge traffic on every drag. Threshold: roughly ±20% on the
+    // longitude delta (log-distance ≥ 0.2), matched empirically to
+    // human-perceptible zoom steps.
+    if (!prev || Math.abs(Math.log(region.longitudeDelta / prev.longitudeDelta)) > 0.2) {
+      setZoomLngDelta(region.longitudeDelta);
+    }
+    // Push the viewport bbox into state so the debounced fetch effect
+    // above picks it up. We don't fetch directly here so a fast inertial
+    // pan / pinch (which fires multiple regionChangeComplete events
+    // within tens of ms on iOS) collapses into a single RPC.
+    //
+    // Equality guard is critical: iOS fires regionChangeComplete several
+    // times during the initial fitToCoordinates animation, each with a
+    // bbox that's effectively the same. Without bboxesEqualish dedupe,
+    // every fire created a fresh object → re-render → visibleHabitats
+    // memo invalidated → progressive-mount effect cancelled mid-rAF →
+    // tick never fired → mountedHabitatIds stayed empty → render kept
+    // showing 0 polygons forever. That was the actual cause of the
+    // "render → 0 polygons" log loop with no progress.
+    if (habitatsEnabled) {
+      const bbox: HabitatBbox = {
+        minLng: region.longitude - region.longitudeDelta / 2,
+        minLat: region.latitude - region.latitudeDelta / 2,
+        maxLng: region.longitude + region.longitudeDelta / 2,
+        maxLat: region.latitude + region.latitudeDelta / 2,
+      };
+      setPendingViewportBbox((prev) =>
+        prev && bboxesEqualish(prev, bbox) ? prev : bbox,
+      );
+    }
   };
 
   // Toggle effect: fire a fetch immediately when townlands turn on (so the
@@ -378,16 +711,180 @@ export default function ProjectMapScreen() {
     saveHabitatsPref(enabled);
   };
 
+  // Per-habitat bbox span in degrees, computed once per habitats array.
+  // Cheap (single sweep over each polygon's coordinates) and reused by
+  // the skip-when-tiny filter on every zoom step, so paying for it once
+  // beats recomputing inside the filter.
+  const habitatBboxSizes = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const h of habitats) {
+      const span = habitatBboxSpanDegrees(h.boundary);
+      if (span != null) map.set(h.id, span);
+    }
+    return map;
+  }, [habitats]);
+
+  // Per-habitat full bbox (min/max lng/lat). Powers the row-level
+  // viewport AABB filter in visibleHabitats. Same single-sweep cost as
+  // habitatBboxSizes.
+  const habitatFullBboxes = useMemo(() => {
+    const map = new Map<string, HabitatBbox>();
+    for (const h of habitats) {
+      const bb = habitatGeometryBbox(h.boundary);
+      if (bb) map.set(h.id, bb);
+    }
+    return map;
+  }, [habitats]);
+
+  // Stable area-descending order. Computed once per habitats array (not
+  // per filter step) so the hard cap below picks a consistent top-N
+  // regardless of which other polygons get culled by site / zoom — a
+  // polygon that's in the top-N at one zoom stays in it at the next,
+  // which keeps the visual layer stable as the user zooms in/out.
+  const sortedHabitats = useMemo(() => {
+    return [...habitats].sort((a, b) => (b.area_hectares ?? 0) - (a.area_hectares ?? 0));
+  }, [habitats]);
+
+  // Coords the camera will fit on first paint — selected site if there
+  // is one, else the project-wide bbox. Used to seed both the initial
+  // viewport bbox and the initial zoom estimate so they match what
+  // fitToCoordinates will actually produce. Without this, the first
+  // render briefly used project-wide coords even when the user had a
+  // small site selected, leaving the viewport AABB filter too loose
+  // and rendering polygons that aren't on screen.
+  const focusCoords = useMemo(() => {
+    if (!data) return [];
+    if (selectedSiteId) {
+      const site = data.sites.find((s) => s.id === selectedSiteId);
+      const sitePoly = polygonToCoordinates(site?.boundary ?? null);
+      if (sitePoly.length > 0) return sitePoly;
+    }
+    return flattenBoundaryCoordinates(data);
+  }, [data, selectedSiteId]);
+
+  // Initial zoom estimate matching the focus coords above. The 1.4×
+  // fudge accounts for FIT_PADDING expanding the camera beyond the raw
+  // bbox.
+  const initialZoomLngDelta = useMemo(() => {
+    if (focusCoords.length === 0) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const c of focusCoords) {
+      if (c.longitude < min) min = c.longitude;
+      if (c.longitude > max) max = c.longitude;
+    }
+    if (!isFinite(min) || max === min) return null;
+    return (max - min) * 1.4;
+  }, [focusCoords]);
+
+  // Effective threshold — the live zoom once we have it, otherwise the
+  // project-bbox derived seed. Null only when both are missing (no
+  // boundary loaded), in which case the size filter degrades to a no-op.
+  const effectiveZoomDelta = zoomLngDelta ?? initialZoomLngDelta;
+
+  // Initial viewport bbox matching the focus coords (so it tracks the
+  // selected site). Used as the cull anchor *before* the first
+  // regionChangeComplete fires, when viewportBbox state is still null.
+  const initialViewportBbox = useMemo(() => {
+    return bboxFromCoords(focusCoords);
+  }, [focusCoords]);
+
+  // Live viewport for the AABB filter — the camera region after the
+  // most recent regionChangeComplete, falling back to the initial
+  // project-boundary bbox until the user moves the map.
+  const effectiveViewport = pendingViewportBbox ?? initialViewportBbox;
+
   // Site-aware habitat list. When the surveyor narrows to one site we hide
   // the rest of the project's habitats — same rationale as buffer rings:
   // unrelated polygons add visual noise once the focus has moved. Habitats
   // with site_id === null (project-wide rows, e.g. legacy imports) stay
   // visible across both modes so they're never accidentally hidden.
+  //
+  // After the site filter, an additional zoom-aware size cull drops any
+  // polygon whose bbox is smaller than ~MIN_HABITAT_PIXELS at the current
+  // zoom. At fit-zoom on a county-scale project that filters out most
+  // sub-100m polygons (invisible anyway); zooming in naturally lifts the
+  // threshold and brings them back.
   const visibleHabitats = useMemo(() => {
     if (!habitatsEnabled) return [];
-    if (!selectedSiteId) return habitats;
-    return habitats.filter((h) => h.site_id === selectedSiteId || h.site_id === null);
-  }, [habitats, habitatsEnabled, selectedSiteId]);
+    // Zoom hard floor — surveyors only care about polygon detail at
+    // parcel scale; at "I can see the whole county" zoom even a few
+    // surviving polygons read as visual noise (Android user reported
+    // this — cap=500 there leaves enough through that they appeared as
+    // dots at the edges). Below the threshold, paint nothing.
+    if (effectiveZoomDelta != null) {
+      const zoom = approximateZoom(effectiveZoomDelta, SCREEN_WIDTH);
+      if (zoom < MIN_HABITAT_RENDER_ZOOM) return [];
+    }
+    let rows = sortedHabitats;
+    if (selectedSiteId) {
+      rows = rows.filter((h) => h.site_id === selectedSiteId || h.site_id === null);
+    }
+    // Viewport AABB filter — the central guard that makes accumulating
+    // store + bounded rendering coexist. Even if the user has panned
+    // across the whole project and the store holds 1000 polygons, only
+    // those whose bbox actually intersects the camera region get
+    // mounted. Pan back to a previously-visited area → those polygons
+    // re-mount from the store with no RPC. Zoom out beyond the project
+    // → the 50 km² zoom guard above stops fetches; existing polygons
+    // still render but at low zoom they get dropped by the size cull
+    // below anyway.
+    if (effectiveViewport && habitatFullBboxes.size > 0) {
+      rows = rows.filter((h) => {
+        const bb = habitatFullBboxes.get(h.id);
+        return bb == null || bboxesIntersect(bb, effectiveViewport);
+      });
+    }
+    if (effectiveZoomDelta != null && habitatBboxSizes.size > 0) {
+      const minDegSize = (MIN_HABITAT_PIXELS / SCREEN_WIDTH) * effectiveZoomDelta;
+      rows = rows.filter((h) => {
+        const span = habitatBboxSizes.get(h.id);
+        // Unknown size → keep (better to render an unsized polygon than
+        // silently drop it). Known but tiny → skip.
+        return span == null || span >= minDegSize;
+      });
+    }
+    // Hard cap, last line of defence. With viewport + size filters in
+    // place this normally never bites; kept as a safety net for
+    // pathological inputs (e.g. a single polygon covering the whole
+    // viewport at zoom-out).
+    if (rows.length > MAX_HABITAT_POLYGONS) {
+      rows = rows.slice(0, MAX_HABITAT_POLYGONS);
+    }
+    return rows;
+  }, [
+    sortedHabitats,
+    habitatsEnabled,
+    selectedSiteId,
+    effectiveZoomDelta,
+    habitatBboxSizes,
+    effectiveViewport,
+    habitatFullBboxes,
+  ]);
+
+  // Persistent ref-based piece cache. Grows monotonically — each
+  // habitat is decomposed + decimated + bbox-computed ONCE per session
+  // (per project). Every subsequent render that touches the same
+  // habitat just does an O(1) Map lookup. Earlier `useMemo` versions
+  // either rebuilt for ALL habitats (8019 pieces, 3+ s freeze) or
+  // rebuilt for `visibleHabitats` (which changes on every pan/zoom,
+  // so the build cost compounded across renders).
+  //
+  // The cache is read-only-from-render — the actual writes happen
+  // inside `habitatPolygonElements` below, lazily as habitats become
+  // visible. Project change resets the ref via the effect.
+  const piecesCacheRef = useRef<
+    Map<string, Array<{ piece: HabitatRenderPiece; bbox: HabitatBbox | null }>>
+  >(new Map());
+  useEffect(() => {
+    piecesCacheRef.current = new Map();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // (Old per-layer rAF chain removed — replaced by the single
+  // polygonMountBudget counter above. Keeping a single source of
+  // truth avoids the previous race where multiple effects fought over
+  // visibleHabitats reference changes.)
 
   // Pre-compute the habitat <Polygon> elements once per data/basemap change.
   // Without this, every selectedHabitat update (i.e. every polygon tap) had
@@ -402,43 +899,135 @@ export default function ProjectMapScreen() {
   // layer, just the modal renders. setSelectedHabitat is a stable setState
   // setter so closing over it inside the memo is safe.
   const habitatPolygonElements = useMemo(() => {
+    // Habitats consume whatever budget is left after designated. With
+    // designated mounting first, the user gets NPWS context up front
+    // and saved habitats stream in once that's done.
+    const budgetForHabitats = Math.max(
+      0,
+      polygonMountBudget - MAX_DESIGNATED_POLYGONS,
+    );
+    if (budgetForHabitats === 0) return [];
     const out: ReactElement[] = [];
+    let totalVerticesAfterDecimation = 0;
+    let droppedOutOfView = 0;
+    let droppedByCap = 0;
     for (const habitat of visibleHabitats) {
-      const pieces = habitatPolygonPieces(habitat.boundary);
-      if (pieces.length === 0) continue;
+      if (out.length >= Math.min(budgetForHabitats, MAX_HABITAT_POLYGONS)) {
+        droppedByCap++;
+        continue;
+      }
+      // Lazy lookup-or-build against the persistent ref cache. First
+      // time we see a habitat we pay the decomposition cost; every
+      // subsequent render is a Map.get. Across pan/zoom this is the
+      // single biggest perf win for cadastral-import projects.
+      let piecesWithBbox = piecesCacheRef.current.get(habitat.id);
+      if (!piecesWithBbox) {
+        const pieces = habitatPolygonPieces(habitat.boundary, {
+          maxVerticesPerRing: MAX_VERTICES_PER_RING,
+        });
+        piecesWithBbox = pieces.map((piece) => ({
+          piece,
+          bbox: bboxFromCoords(piece.outer),
+        }));
+        piecesCacheRef.current.set(habitat.id, piecesWithBbox);
+      }
+      if (piecesWithBbox.length === 0) continue;
       const fill = habitat.fossitt_code
         ? getFossittColor(habitat.fossitt_code)
         : UNCLASSIFIED_HABITAT_COLOR;
       const stroke = darkenHex(fill, 0.65);
-      pieces.forEach((piece, idx) => {
+      for (let idx = 0; idx < piecesWithBbox.length; idx++) {
+        if (out.length >= MAX_HABITAT_POLYGONS) {
+          droppedByCap++;
+          break;
+        }
+        const { piece, bbox: pieceBbox } = piecesWithBbox[idx];
+        if (effectiveViewport && pieceBbox && !bboxesIntersect(pieceBbox, effectiveViewport)) {
+          droppedOutOfView++;
+          continue;
+        }
+        if (__DEV__) {
+          totalVerticesAfterDecimation += piece.outer.length;
+          if (HABITAT_RENDER_HOLES) {
+            for (const hole of piece.holes) totalVerticesAfterDecimation += hole.length;
+          }
+        }
         out.push(
           <Polygon
             key={`${baseMap}-habitat-${habitat.id}-${idx}`}
             coordinates={piece.outer}
-            holes={piece.holes.length > 0 ? piece.holes : undefined}
+            holes={
+              HABITAT_RENDER_HOLES && piece.holes.length > 0 ? piece.holes : undefined
+            }
             strokeColor={stroke}
             strokeWidth={2}
             fillColor={`${fill}59`}
-            tappable
-            onPress={() => setSelectedHabitat(habitat)}
+            tappable={HABITAT_TAPPABLE}
+            onPress={HABITAT_TAPPABLE ? () => setSelectedHabitat(habitat) : undefined}
             zIndex={Z_HABITAT}
           />,
         );
-      });
+      }
+    }
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[habitats] render → ${out.length} polygons, ${totalVerticesAfterDecimation} vertices (cap=${MAX_HABITAT_POLYGONS}, vMax=${MAX_VERTICES_PER_RING ?? "∞"}, dropped: ${droppedOutOfView} off-view, ${droppedByCap} over-cap)`,
+      );
     }
     return out;
-  }, [visibleHabitats, baseMap]);
+  }, [visibleHabitats, polygonMountBudget, baseMap, effectiveViewport]);
 
-  // Same memoisation for designated polygons. They're fewer in count
-  // (typically <50 per project), but the same pattern keeps the layers
-  // consistent and makes future additions cheaper.
+  // Same memoisation for designated polygons. NPWS sites can be huge
+  // estuarine geometries with thousands of vertices and dozens of
+  // multipolygon parts; without decimation + a piece cap they were the
+  // hidden half of the "15 s frozen iOS" report (the other half was
+  // habitats). Both gates also wait for InteractionManager so the
+  // navigation+fit animation runs before any heavy bridge work.
+  // Pre-decomposed designated pieces. Same pattern + same reason as
+  // habitatPiecesCache — without this, the `designatedPolygonElements`
+  // memo (whose deps include polygonMountBudget) re-ran polygonsForRender
+  // for every NPWS site on every 50 ms tick, decomposing complex
+  // estuarine geometries from scratch each time. With ~50 sites × ~20 ms
+  // per decompose, each tick spent ~1 s in the memo and the budget
+  // advanced 5× too slow. Logs showed `mount budget=40 t=2704ms` →
+  // `mount budget=45 t=8022ms`, exactly the symptom this cache fixes.
+  const designatedPiecesCache = useMemo(() => {
+    const cache = new Map<string, DesignatedRenderPiece[]>();
+    for (const site of designated) {
+      const pieces = polygonsForRender(site.geometry, {
+        maxVerticesPerRing: DESIGNATED_MAX_VERTICES_PER_RING,
+      });
+      cache.set(designatedCacheKey(site), pieces);
+    }
+    if (__DEV__) {
+      let totalPieces = 0;
+      for (const v of cache.values()) totalPieces += v.length;
+      // eslint-disable-next-line no-console
+      console.log(
+        `[map] designatedPiecesCache built: ${cache.size} sites → ${totalPieces} pieces`,
+      );
+    }
+    return cache;
+  }, [designated]);
+
   const designatedPolygonElements = useMemo(() => {
+    // Designated mounts FIRST — gets the lower portion of the global
+    // budget. Habitats then take whatever budget remains.
+    const budgetForDesignated = Math.min(
+      polygonMountBudget,
+      MAX_DESIGNATED_POLYGONS,
+    );
+    if (budgetForDesignated === 0) return [];
     const out: ReactElement[] = [];
     for (const site of designated) {
-      const pieces = polygonsForRender(site.geometry);
-      if (pieces.length === 0) continue;
+      if (out.length >= budgetForDesignated) break;
+      const pieces = designatedPiecesCache.get(designatedCacheKey(site));
+      if (!pieces || pieces.length === 0) continue;
       const colour = getDesignatedSiteColor(site.site_type);
-      pieces.forEach((piece, idx) => {
+      for (let idx = 0; idx < pieces.length; idx++) {
+        if (out.length >= budgetForDesignated) break;
+        const piece = pieces[idx];
         out.push(
           <Polygon
             key={`${baseMap}-${designatedCacheKey(site)}-${idx}`}
@@ -452,10 +1041,52 @@ export default function ProjectMapScreen() {
             zIndex={Z_DESIGNATED}
           />,
         );
-      });
+      }
     }
     return out;
-  }, [designated, baseMap]);
+  }, [designated, baseMap, polygonMountBudget, designatedPiecesCache]);
+
+  // Site polygons (and the project-boundary fallback when there are no
+  // sites). Memoised for the same reason as habitats/designated: any
+  // unrelated state change (e.g. opening the layers panel, picking a
+  // different site) used to rebuild this JSX inline, sending fresh
+  // <Polygon> elements through the native bridge while the map is still
+  // holding hundreds of habitat overlays.
+  const sitePolygonElements = useMemo(() => {
+    if (!data) return [] as ReactElement[];
+    const out: ReactElement[] = [];
+    for (const site of data.sites) {
+      const coords = polygonToCoordinates(site.boundary);
+      if (coords.length === 0) continue;
+      const isPrimary = selectedSiteId === null || site.id === selectedSiteId;
+      out.push(
+        <Polygon
+          key={`${baseMap}-${site.id}`}
+          coordinates={coords}
+          strokeColor={isPrimary ? colors.primary.DEFAULT : "#94a3b8"}
+          strokeWidth={isPrimary ? 3 : 1.5}
+          fillColor={isPrimary ? colors.primary.DEFAULT + "33" : "transparent"}
+          zIndex={Z_SITE_POLYGON}
+        />,
+      );
+    }
+    if (data.sites.length === 0 && data.projectBoundary?.geometry) {
+      const coords = polygonToCoordinates(data.projectBoundary.geometry);
+      if (coords.length > 0) {
+        out.push(
+          <Polygon
+            key={`${baseMap}-boundary`}
+            coordinates={coords}
+            strokeColor={colors.primary.DEFAULT}
+            strokeWidth={3}
+            fillColor={colors.primary.DEFAULT + "33"}
+            zIndex={Z_SITE_POLYGON}
+          />,
+        );
+      }
+    }
+    return out;
+  }, [data, selectedSiteId, baseMap]);
 
   // Buffer rings around each site, matching the web map. Each site carries
   // its own buffer_distances (km); when null we fall back to the shared
@@ -464,8 +1095,28 @@ export default function ProjectMapScreen() {
   // bigger halo underneath, and we re-buffer only when the boundary or
   // selection changes — turf.buffer is pure-JS but heavy enough that we
   // don't want it firing on every pan.
+  // turf.buffer is pure-JS and heavy (200-500 ms per ring on real
+  // site geometries). Earlier we used `polygonMountBudget < 5` inside
+  // the memo, but the budget was *also* in the memo's deps — so every
+  // 50 ms tick re-ran the entire buffer computation. With ~45 ticks
+  // that compounded into seconds of redundant JS work, freezing the
+  // map after habitats fetched. Now we flip a one-shot ready flag once
+  // the mount has progressed enough; the memo only recomputes when
+  // the flag flips (or the underlying boundary changes).
+  const [bufferRingsReady, setBufferRingsReady] = useState(false);
+  useEffect(() => {
+    if (!bufferRingsReady && polygonMountBudget >= 5) {
+      setBufferRingsReady(true);
+    }
+  }, [bufferRingsReady, polygonMountBudget]);
+
   const bufferRings = useMemo(() => {
-    if (!data) return [];
+    if (!data || !bufferRingsReady) return [];
+    // Diagnostic timing kept (cheap) — useful if turf.buffer ever shows
+    // up again as a hot spot. The bufferRingsReady gate already defers
+    // the first compute until polygon-mount budget has progressed, so
+    // this no longer competes with initial paint.
+    const tStart = Date.now();
     const rings: Array<{
       key: string;
       coords: Array<{ latitude: number; longitude: number }>;
@@ -507,8 +1158,12 @@ export default function ProjectMapScreen() {
       // RPC yet, so the default is the only signal here.
       addRingsFor(data.projectBoundary.geometry, null, "buf-project");
     }
+    if (__DEV__) {
+      // eslint-disable-next-line no-console
+      console.log(`[map] bufferRings: ${rings.length} rings in ${Date.now() - tStart}ms`);
+    }
     return rings;
-  }, [data, selectedSiteId]);
+  }, [data, selectedSiteId, bufferRingsReady]);
 
   const hasGeometry = data ? flattenBoundaryCoordinates(data).length > 0 : false;
 
@@ -605,32 +1260,12 @@ export default function ProjectMapScreen() {
                   zIndex={Z_OVERLAY_TILE}
                 />
               )}
-              {data?.sites.map((site) => {
-                const coords = polygonToCoordinates(site.boundary);
-                if (coords.length === 0) return null;
-                const isPrimary = selectedSiteId === null || site.id === selectedSiteId;
-                return (
-                  <Polygon
-                    key={`${baseMap}-${site.id}`}
-                    coordinates={coords}
-                    strokeColor={isPrimary ? colors.primary.DEFAULT : "#94a3b8"}
-                    strokeWidth={isPrimary ? 3 : 1.5}
-                    fillColor={isPrimary ? colors.primary.DEFAULT + "33" : "transparent"}
-                    zIndex={Z_SITE_POLYGON}
-                  />
-                );
-              })}
-              {/* Project-level boundary fallback when no site polygons exist. */}
-              {data && data.sites.length === 0 && data.projectBoundary?.geometry && (
-                <Polygon
-                  key={`${baseMap}-boundary`}
-                  coordinates={polygonToCoordinates(data.projectBoundary.geometry)}
-                  strokeColor={colors.primary.DEFAULT}
-                  strokeWidth={3}
-                  fillColor={colors.primary.DEFAULT + "33"}
-                  zIndex={Z_SITE_POLYGON}
-                />
-              )}
+              {/* Site polygons + project-boundary fallback are rendered
+                  from a memoised JSX array — see sitePolygonElements
+                  above. Same reasoning as designated/habitats: keeps
+                  unrelated re-renders (layers panel open, polygon tap)
+                  from rebuilding this layer through the native bridge. */}
+              {sitePolygonElements}
 
               {/* Designated sites + habitat polygons are rendered from
                   pre-memoised JSX arrays so polygon-tap state changes
@@ -706,6 +1341,18 @@ export default function ProjectMapScreen() {
                     </View>
                   );
                 })}
+              </View>
+            )}
+
+            {/* Zoom-guard hint — visible when the user has habitats on
+                but the viewport is too wide for the RPC to safely return.
+                Polygons already loaded stay drawn (the module store
+                doesn't shrink); we just stop fetching new ones until
+                the user zooms in. */}
+            {habitatsEnabled && viewportTooLarge && (
+              <View style={styles.zoomHintWrap} pointerEvents="none">
+                <Ionicons name="search-outline" size={16} color={colors.white} />
+                <Text style={styles.zoomHintText}>Zoom in to load habitats</Text>
               </View>
             )}
           </View>
@@ -826,6 +1473,20 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: "row", alignItems: "center", gap: 6 },
   legendSwatch: { width: 12, height: 12, borderRadius: 2 },
   legendLabel: { color: colors.white, fontSize: 12, fontWeight: "600" },
+
+  zoomHintWrap: {
+    position: "absolute",
+    top: 12,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(0,0,0,0.7)",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+  },
+  zoomHintText: { color: colors.white, fontSize: 13, fontWeight: "600" },
 
   modalBackdrop: {
     flex: 1,

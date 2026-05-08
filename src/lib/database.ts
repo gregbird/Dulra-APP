@@ -826,10 +826,11 @@ export async function cacheHabitat(params: {
 
 /**
  * Read habitats joined with their boundary geometry from the sibling cache.
- * The geometry table is populated separately by fetchProjectHabitats so this
- * call returns whatever was last cached, even if cacheAllData has just
- * cleared the metadata side. Listed species/threats/photos remain JSON
- * strings — callers parse them.
+ * The geometry table is populated separately by fetchHabitatsInBbox (per
+ * viewport) and fetchProjectHabitats ("Show all" path), so this call
+ * returns whatever was last cached, even if cacheAllData has just cleared
+ * the metadata side. Listed species/threats/photos remain JSON strings —
+ * callers parse them.
  */
 export async function getCachedHabitats(projectId: string): Promise<Array<{
   id: string; project_id: string; fossitt_code: string | null; fossitt_name: string | null;
@@ -894,6 +895,33 @@ export async function setCachedHabitatBoundaries(
       `DELETE FROM cached_habitat_boundaries WHERE project_id = ?`,
       projectId,
     );
+    for (const row of rows) {
+      const json = row.boundary ? JSON.stringify(row.boundary) : null;
+      await database.runAsync(
+        `INSERT OR REPLACE INTO cached_habitat_boundaries (id, project_id, boundary_geojson, cached_at) VALUES (?, ?, ?, ?)`,
+        row.id, projectId, json, now,
+      );
+    }
+  });
+}
+
+/**
+ * Append-style write — same shape as setCachedHabitatBoundaries but does
+ * NOT delete existing rows for the project. Used by viewport-based bbox
+ * fetches that only return a slice of the project's habitats: replacing
+ * the project-wide cache with a slice would lose every boundary the user
+ * had loaded by panning around the map. Each call merges its rows in via
+ * INSERT OR REPLACE so re-fetching the same bbox refreshes those rows
+ * without disturbing the rest.
+ */
+export async function appendCachedHabitatBoundaries(
+  projectId: string,
+  rows: Array<{ id: string; boundary: unknown | null }>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  const database = await getDatabase();
+  const now = new Date().toISOString();
+  await database.withTransactionAsync(async () => {
     for (const row of rows) {
       const json = row.boundary ? JSON.stringify(row.boundary) : null;
       await database.runAsync(

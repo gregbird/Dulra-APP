@@ -111,6 +111,19 @@ function siteFromRpc(s: RpcSiteResponse): ProjectBoundarySite {
  * skip the network entirely and read an empty cache. Active NetInfo.fetch
  * here resolves the truth before the store has caught up.
  */
+/**
+ * Module-level boundary cache — survives screen unmounts so navigating
+ * from the project-detail preview map (which already fetched the
+ * boundary) into the fullscreen map paints instantly without a second
+ * RPC round-trip. Populated as a side-effect of every successful
+ * `fetchProjectBoundary` call.
+ */
+const boundaryMemoryCache = new Map<string, ProjectBoundary>();
+
+export function getMemoryProjectBoundary(projectId: string): ProjectBoundary | null {
+  return boundaryMemoryCache.get(projectId) ?? null;
+}
+
 export async function fetchProjectBoundary(projectId: string): Promise<ProjectBoundary> {
   let isOnline = useNetworkStore.getState().isOnline;
   if (!isOnline) {
@@ -164,10 +177,13 @@ export async function fetchProjectBoundary(projectId: string): Promise<ProjectBo
       });
     }
 
+    boundaryMemoryCache.set(projectId, result);
     return result;
   } catch {
     const cached = await getCachedProjectBoundary(projectId);
-    return cached ? parseCachedBoundary(cached) : emptyBoundary();
+    const parsed = cached ? parseCachedBoundary(cached) : emptyBoundary();
+    boundaryMemoryCache.set(projectId, parsed);
+    return parsed;
   }
 }
 

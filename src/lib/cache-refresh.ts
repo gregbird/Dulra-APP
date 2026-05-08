@@ -13,6 +13,7 @@ import {
 } from "@/lib/database";
 import { buildFormDataFromReleve } from "@/lib/releve-save";
 import { fetchProjectBoundary } from "@/lib/project-boundary";
+import { invalidateHabitatsMemoryCache } from "@/lib/habitats";
 
 /**
  * Sequential batches of `concurrency` boundary fetches. Each call writes
@@ -42,13 +43,14 @@ async function warmProjectBoundaries(projectIds: string[], concurrency = 8): Pro
 // polygons available offline. Acceptable; the boundary itself is warmed.
 //
 // Habitat polygons follow the same pattern. cacheAllData warms metadata
-// only (no boundary geometry) via the direct table select above; the RPC
-// `get_project_habitats` (with ST_AsGeoJSON) is called lazily by
-// fetchProjectHabitats when the user actually opens the project map or
-// the Habitats tab. Geometry payload is typically 200 KB - 2 MB but a
-// known cadastral-import outlier reaches 11 MB; warming that for every
-// project on every session would dominate startup bandwidth for users
-// who never open those projects.
+// only (no boundary geometry) via the direct table select above; geometry
+// is loaded lazily and *viewport-bound* by `fetchHabitatsInBbox` when the
+// user opens the project map or the Habitats list. Outlier projects (1000+
+// polygons, 11 MB full-project payload) used to freeze iOS for ~60 s when
+// the old "fetch all" call ran on map open; the bbox flow keeps each fetch
+// to ≤500 rows, so the per-call payload is bounded regardless of project
+// size. The "Show all" button on the list screen is the only remaining
+// path to the unbounded fetch, and it's an explicit user action.
 
 export async function cacheAllData(): Promise<boolean> {
   const { isOnline } = useNetworkStore.getState();
@@ -150,7 +152,14 @@ export async function cacheAllData(): Promise<boolean> {
       }
     }
 
-    if (templates || projects || surveys || habitats || targetNotes || sites) await clearCachedData();
+    if (templates || projects || surveys || habitats || targetNotes || sites) {
+      await clearCachedData();
+      // Habitats live in a parallel module-level cache that survives
+      // screen unmounts; flush it alongside the SQLite reset so the next
+      // map open re-fetches geometry against the fresh metadata instead
+      // of returning a stale in-memory snapshot.
+      invalidateHabitatsMemoryCache();
+    }
 
     const database = await getDatabase();
     await database.withTransactionAsync(async () => {

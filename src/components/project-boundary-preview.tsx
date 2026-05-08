@@ -34,12 +34,21 @@ import {
   type DesignatedSite,
 } from "@/lib/designated-sites";
 import {
+  getHabitatsForProject,
+  habitatPolygonPieces,
+  habitatBboxSpanDegrees,
+  darkenHex,
+} from "@/lib/habitats";
+import { getFossittColor } from "@/lib/fossitt-utils";
+import { UNCLASSIFIED_HABITAT_COLOR, type HabitatPolygon } from "@/types/habitat";
+import {
   BASE_MAPS,
   DEFAULT_BASE_MAP,
   loadMapLayerPrefs,
   resolveTileCachePath,
   resolveTileUrl,
   saveBaseMapPref,
+  saveHabitatsPref,
   saveTownlandsPref,
   type BaseMapId,
 } from "@/lib/map-layers";
@@ -67,6 +76,21 @@ const PREVIEW_HEIGHT = 200;
 const FIT_PADDING = { top: 30, right: 30, bottom: 30, left: 30 };
 
 const TOWNLANDS_STROKE = "#a855f7";
+
+// Skip-when-tiny threshold for habitat polygons in the preview. Same
+// rationale as the fullscreen map (project-map-screen.tsx) — polygons
+// smaller than ~6 px on screen are invisible noise that still cost a
+// native overlay add. The card is short (200 px) but full-width, so we
+// key off the same screen-width axis as the fullscreen filter.
+const MIN_HABITAT_PIXELS = 6;
+const SCREEN_WIDTH = Dimensions.get("window").width;
+
+// Hard cap on rendered habitat polygons in the preview. Tighter than the
+// fullscreen map (250) — the preview is a card on a list-style screen
+// where keeping FlatList scroll smooth matters more than completeness.
+// See project-map-screen.tsx for the full rationale.
+const MAX_HABITAT_POLYGONS = Platform.OS === "ios" ? 80 : 150;
+const MAX_VERTICES_PER_RING = Platform.OS === "ios" ? 48 : undefined;
 
 // Tile cache root. Per-source slot is appended via resolveTileCachePath so
 // each base map keeps its own folder — UrlTile keys cache by {z}/{x}/{y}
@@ -104,9 +128,20 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
   // flip the values once it resolves.
   const [baseMap, setBaseMap] = useState<BaseMapId>(DEFAULT_BASE_MAP);
   const [townlandsEnabled, setTownlandsEnabled] = useState(false);
+  const [habitatsEnabled, setHabitatsEnabled] = useState(false);
+  const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
   const [layersOpen, setLayersOpen] = useState(false);
   const [townlands, setTownlands] = useState<TownlandFeature[]>([]);
   const [selectedTownland, setSelectedTownland] = useState<TownlandFeature | null>(null);
+  // Live zoom span for the skip-when-tiny habitat cull, updated only on
+  // significant zoom changes — see handleRegionChangeComplete. Same shape
+  // as the fullscreen map.
+  const [zoomLngDelta, setZoomLngDelta] = useState<number | null>(null);
+  // Progressive-mount cursor for habitat polygons — see the
+  // requestAnimationFrame effect below. Same shape as the fullscreen
+  // map: mounted IDs grow in chunks across frames so the native bridge
+  // can't block the JS thread for tens of seconds at once.
+  const [mountedHabitatIds, setMountedHabitatIds] = useState<Set<string>>(() => new Set());
   const lastTownlandBbox = useRef<TownlandsBbox | null>(null);
   const lastRegion = useRef<Region | null>(null);
   const townlandFetchSeq = useRef(0);
@@ -117,9 +152,27 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
       if (cancelled) return;
       setBaseMap(prefs.baseMap);
       setTownlandsEnabled(prefs.townlandsEnabled);
+      setHabitatsEnabled(prefs.habitatsEnabled);
     });
     return () => { cancelled = true; };
   }, []);
+
+  // Preview habitats: read-only display from the module-level store
+  // ONLY. We deliberately do NOT fire a fetch here — the preview lives
+  // on the project-detail screen, and an in-flight RPC racing the
+  // user's tap to open the full map kept re-populating the module
+  // store after the full map screen had cleared it, which produced a
+  // 30 s JS-thread freeze on the full map. If the full map has already
+  // been opened this session the cache is hot and these polygons render
+  // instantly; otherwise the preview shows the boundary alone, which
+  // is the right call for a small list-card preview anyway.
+  useEffect(() => {
+    if (!habitatsEnabled) {
+      setHabitats([]);
+      return;
+    }
+    setHabitats(getHabitatsForProject(projectId, selectedSiteId ?? null));
+  }, [projectId, habitatsEnabled, selectedSiteId]);
 
   const baseMapConfig = BASE_MAPS[baseMap];
 
@@ -264,9 +317,100 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
   };
 
   const handleRegionChangeComplete = (region: Region) => {
+    const prev = lastRegion.current;
     lastRegion.current = region;
     refreshTownlands(region);
+    if (!prev || Math.abs(Math.log(region.longitudeDelta / prev.longitudeDelta)) > 0.2) {
+      setZoomLngDelta(region.longitudeDelta);
+    }
   };
+
+  // Habitat bbox sizes + zoom-aware visibility filter — mirror of the
+  // fullscreen map's logic. See project-map-screen.tsx for the rationale
+  // (skip polygons whose on-screen size is below MIN_HABITAT_PIXELS).
+  const habitatBboxSizes = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const h of habitats) {
+      const span = habitatBboxSpanDegrees(h.boundary);
+      if (span != null) map.set(h.id, span);
+    }
+    return map;
+  }, [habitats]);
+
+  // Stable area-descending order for the hard cap below.
+  const sortedHabitats = useMemo(() => {
+    return [...habitats].sort((a, b) => (b.area_hectares ?? 0) - (a.area_hectares ?? 0));
+  }, [habitats]);
+
+  const initialZoomLngDelta = useMemo(() => {
+    if (!data) return null;
+    const coords = flattenBoundaryCoordinates(data);
+    if (coords.length === 0) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const c of coords) {
+      if (c.longitude < min) min = c.longitude;
+      if (c.longitude > max) max = c.longitude;
+    }
+    if (!isFinite(min) || max === min) return null;
+    return (max - min) * 1.4;
+  }, [data]);
+
+  const effectiveZoomDelta = zoomLngDelta ?? initialZoomLngDelta;
+
+  const visibleHabitats = useMemo(() => {
+    if (!habitatsEnabled) return [] as HabitatPolygon[];
+    let rows = sortedHabitats;
+    if (selectedSiteId) {
+      rows = rows.filter((h) => h.site_id === selectedSiteId || h.site_id === null);
+    }
+    if (effectiveZoomDelta != null && habitatBboxSizes.size > 0) {
+      const minDegSize = (MIN_HABITAT_PIXELS / SCREEN_WIDTH) * effectiveZoomDelta;
+      rows = rows.filter((h) => {
+        const span = habitatBboxSizes.get(h.id);
+        return span == null || span >= minDegSize;
+      });
+    }
+    if (rows.length > MAX_HABITAT_POLYGONS) {
+      rows = rows.slice(0, MAX_HABITAT_POLYGONS);
+    }
+    return rows;
+  }, [sortedHabitats, habitatsEnabled, selectedSiteId, effectiveZoomDelta, habitatBboxSizes]);
+
+  // Progressive mount — see project-map-screen.tsx for the rationale.
+  // Smaller chunks here (8 vs 10) since the preview lives on a
+  // list-style screen and FlatList scroll smoothness matters.
+  const mountedHabitatIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const CHUNK = 8;
+    let cancelled = false;
+    let rafId: ReturnType<typeof requestAnimationFrame> | null = null;
+    const tick = () => {
+      if (cancelled) return;
+      const targetIds = new Set(visibleHabitats.map((h) => h.id));
+      const current = mountedHabitatIdsRef.current;
+      const next = new Set<string>();
+      for (const id of current) if (targetIds.has(id)) next.add(id);
+      let added = 0;
+      for (const h of visibleHabitats) {
+        if (added >= CHUNK) break;
+        if (!next.has(h.id)) {
+          next.add(h.id);
+          added++;
+        }
+      }
+      mountedHabitatIdsRef.current = next;
+      setMountedHabitatIds(next);
+      if (next.size < targetIds.size) {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      if (rafId != null) cancelAnimationFrame(rafId);
+    };
+  }, [visibleHabitats]);
 
   useEffect(() => {
     if (!townlandsEnabled) {
@@ -292,6 +436,11 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
   const handleToggleTownlands = (enabled: boolean) => {
     setTownlandsEnabled(enabled);
     saveTownlandsPref(enabled);
+  };
+
+  const handleToggleHabitats = (enabled: boolean) => {
+    setHabitatsEnabled(enabled);
+    saveHabitatsPref(enabled);
   };
 
   if (loading) {
@@ -405,6 +554,34 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
           ));
         })}
 
+        {/* Habitats layer: simple read-only paint — FOSSITT-coloured fills,
+            stroke at 65% darkness, no tap. The Habitats tab on the
+            project-detail screen is where the user inspects details; the
+            preview's job is just visual context. Skip-when-tiny culls
+            sub-6px polygons + progressive-mount gates by mountedHabitatIds
+            so the bridge work spreads across frames. */}
+        {visibleHabitats.map((habitat) => {
+          if (!mountedHabitatIds.has(habitat.id)) return null;
+          const pieces = habitatPolygonPieces(habitat.boundary, {
+            maxVerticesPerRing: MAX_VERTICES_PER_RING,
+          });
+          if (pieces.length === 0) return null;
+          const fill = habitat.fossitt_code
+            ? getFossittColor(habitat.fossitt_code)
+            : UNCLASSIFIED_HABITAT_COLOR;
+          const stroke = darkenHex(fill, 0.65);
+          return pieces.map((piece, idx) => (
+            <Polygon
+              key={`${baseMap}-habitat-${habitat.id}-${idx}`}
+              coordinates={piece.outer}
+              holes={piece.holes.length > 0 ? piece.holes : undefined}
+              strokeColor={stroke}
+              strokeWidth={1.5}
+              fillColor={`${fill}59`}
+            />
+          ));
+        })}
+
         {/* Buffer rings, mirroring the fullscreen map. Painted after
             designated sites so the dashed outline reads cleanly over NPWS
             fills, matching the parity rule the brief calls out. */}
@@ -445,6 +622,8 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
         onSelectBaseMap={handleSelectBaseMap}
         townlandsEnabled={townlandsEnabled}
         onToggleTownlands={handleToggleTownlands}
+        habitatsEnabled={habitatsEnabled}
+        onToggleHabitats={handleToggleHabitats}
         visible={layersOpen}
         onOpen={() => setLayersOpen(true)}
         onClose={() => setLayersOpen(false)}

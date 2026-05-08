@@ -1,6 +1,10 @@
 import { supabase } from "@/lib/supabase";
 import { useNetworkStore } from "@/lib/network";
-import { getCachedHabitats, setCachedHabitatBoundaries } from "@/lib/database";
+import {
+  appendCachedHabitatBoundaries,
+  getCachedHabitats,
+  setCachedHabitatBoundaries,
+} from "@/lib/database";
 import { normaliseFossittCode, type HabitatGeometry, type HabitatPolygon } from "@/types/habitat";
 
 /**
@@ -39,6 +43,156 @@ interface RpcHabitatRow {
 
 const RPC_TIMEOUT_MS = 30_000;
 
+/**
+ * Accumulating module-level cache. Keyed by projectId, then by habitat id.
+ *
+ * Why a Map<id, polygon> instead of a flat array: the project map fetches
+ * habitats incrementally — initial open uses the site-or-project boundary
+ * + 100 m bbox, and every pan/zoom pulls more rows for the new viewport.
+ * Per the spec we *never* drop rows the user has already seen; the store
+ * grows monotonically over a session as they pan around. Id-based dedup
+ * means re-fetching an overlapping bbox refreshes existing rows without
+ * duplicating them.
+ *
+ * Memory: typical habitat row with 5 m-simplified geometry is ~5-20 KB.
+ * Even a worst-case session that pans across an entire 1000-row project
+ * tops out at ~20 MB per project, and `cacheAllData` invalidates between
+ * sessions. Acceptable.
+ *
+ * Cleared by invalidateHabitatsMemoryCache() — pull-to-refresh and
+ * cacheAllData both call it.
+ */
+const habitatStore = new Map<string, Map<string, HabitatPolygon>>();
+
+/**
+ * Dedup for the explicit "Show all" path (legacy `get_project_habitats`).
+ * Bbox calls are *not* deduped here — concurrent bbox fetches are
+ * idempotent through the store merge, and the screen's debounce already
+ * keeps overlap rare.
+ */
+const showAllInFlight = new Map<string, Promise<HabitatPolygon[]>>();
+
+export function invalidateHabitatsMemoryCache(projectId?: string): void {
+  if (projectId) {
+    habitatStore.delete(projectId);
+    showAllInFlight.delete(projectId);
+    return;
+  }
+  habitatStore.clear();
+  showAllInFlight.clear();
+}
+
+/**
+ * Synchronous read of the accumulated rows for a project. Used by screens
+ * that want to render whatever the user has already loaded (e.g. the
+ * Habitats list view shows what map pans have populated).
+ */
+export function getHabitatsForProject(
+  projectId: string,
+  siteId?: string | null,
+): HabitatPolygon[] {
+  const projectMap = habitatStore.get(projectId);
+  if (!projectMap) return [];
+  const rows = Array.from(projectMap.values());
+  return siteId
+    ? rows.filter((h) => h.site_id === siteId || h.site_id === null)
+    : rows;
+}
+
+function mergeIntoStore(projectId: string, rows: HabitatPolygon[]): void {
+  let projectMap = habitatStore.get(projectId);
+  if (!projectMap) {
+    projectMap = new Map<string, HabitatPolygon>();
+    habitatStore.set(projectId, projectMap);
+  }
+  for (const row of rows) {
+    projectMap.set(row.id, row);
+  }
+}
+
+// ---------- Bbox helpers ----------
+
+export interface HabitatBbox {
+  minLng: number;
+  minLat: number;
+  maxLng: number;
+  maxLat: number;
+}
+
+/**
+ * Compute the bbox of an array of lat/lng points. Returns null for empty
+ * input — callers should treat that as "no geometry to anchor on" and
+ * skip the fetch instead of sending a degenerate envelope.
+ */
+export function bboxFromCoords(
+  coords: ReadonlyArray<{ latitude: number; longitude: number }>,
+): HabitatBbox | null {
+  if (coords.length === 0) return null;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const c of coords) {
+    if (c.longitude < minLng) minLng = c.longitude;
+    if (c.longitude > maxLng) maxLng = c.longitude;
+    if (c.latitude < minLat) minLat = c.latitude;
+    if (c.latitude > maxLat) maxLat = c.latitude;
+  }
+  if (!isFinite(minLng) || !isFinite(maxLng)) return null;
+  return { minLng, minLat, maxLng, maxLat };
+}
+
+/**
+ * Expand a bbox by `meters` on every side, using a flat-Earth conversion
+ * keyed off the bbox centre's latitude. Good enough at Irish-survey
+ * scales (sub-county) — for a 100 m default buffer the worst-case skew
+ * is well under a metre. Used to widen the initial site/project boundary
+ * before the first bbox fetch so the user lands with a small skirt of
+ * habitats around the boundary, matching the spec's "100 m default".
+ */
+export function expandBboxByMeters(bbox: HabitatBbox, meters: number): HabitatBbox {
+  const latMid = (bbox.minLat + bbox.maxLat) / 2;
+  const dLat = meters / 111_000;
+  const dLng = meters / (111_000 * Math.cos((latMid * Math.PI) / 180));
+  return {
+    minLng: bbox.minLng - dLng,
+    minLat: bbox.minLat - dLat,
+    maxLng: bbox.maxLng + dLng,
+    maxLat: bbox.maxLat + dLat,
+  };
+}
+
+/**
+ * Approximate area of the bbox in km². Same flat-Earth approximation as
+ * expandBboxByMeters — accurate enough for the 50 km² zoom-guard in the
+ * spec, which is itself a soft threshold (the goal is "is this viewport
+ * unreasonably large", not exact area).
+ */
+export function bboxAreaKm2(bbox: HabitatBbox): number {
+  const latMid = (bbox.minLat + bbox.maxLat) / 2;
+  const latKm = (bbox.maxLat - bbox.minLat) * 111;
+  const lngKm = (bbox.maxLng - bbox.minLng) * 111 * Math.cos((latMid * Math.PI) / 180);
+  return Math.max(0, latKm * lngKm);
+}
+
+/**
+ * Loose equality — two bboxes are "the same query" if every corner is
+ * within ~10 m. Used by the screen's debounced fetcher to skip RPC calls
+ * when a tiny pan jiggle would otherwise trigger a redundant round-trip.
+ */
+export function bboxesEqualish(
+  a: HabitatBbox,
+  b: HabitatBbox,
+  tolDeg: number = 0.0001,
+): boolean {
+  return (
+    Math.abs(a.minLng - b.minLng) < tolDeg &&
+    Math.abs(a.minLat - b.minLat) < tolDeg &&
+    Math.abs(a.maxLng - b.maxLng) < tolDeg &&
+    Math.abs(a.maxLat - b.maxLat) < tolDeg
+  );
+}
+
 function rowToHabitat(row: RpcHabitatRow): HabitatPolygon {
   return {
     id: row.id,
@@ -64,37 +218,162 @@ function rowToHabitat(row: RpcHabitatRow): HabitatPolygon {
 }
 
 /**
- * Read habitats for a project (optionally narrowed to one site) via the
- * RPC. Mirrors the designated-sites pattern: probe NetInfo if the network
- * store still says offline (cold-start race), then RPC with timeout, then
- * fall back to SQLite cache on any failure.
+ * Probe NetInfo if the network store says offline (cold-start race) and
+ * flip it back to online if reachable. Shared between bbox and "show
+ * all" fetchers — both want to attempt the RPC if connectivity is
+ * actually present, even when the store hasn't updated yet.
+ */
+async function probeOnlineState(): Promise<boolean> {
+  let isOnline = useNetworkStore.getState().isOnline;
+  if (isOnline) return true;
+  try {
+    const NetInfo = (await import("@react-native-community/netinfo")).default;
+    const state = await NetInfo.fetch();
+    const probedOnline =
+      state.isInternetReachable === true ||
+      (state.isInternetReachable === null && state.isConnected === true);
+    if (probedOnline) {
+      useNetworkStore.getState().setOnline(true);
+      return true;
+    }
+  } catch { /* probe failed — keep pessimistic value */ }
+  return false;
+}
+
+/**
+ * Viewport-bound habitat fetch via `get_habitats_in_bbox`. This is the
+ * default path for the project map and the Habitats list — the screen
+ * decides what bbox to send (initial: site/project boundary + 100 m
+ * buffer, subsequent: the camera's visible region) and we push a small
+ * spatial filter into PostGIS rather than streaming every polygon to
+ * the device.
  *
- * The cache table is cached_habitats (hydrated by cacheAllData on every
- * session/online transition). When this function fetches successfully it
- * also writes geometry back into cached_habitat_boundaries — split off the
- * primary cache so the per-row metadata can survive a clearCachedData()
- * pass without losing the heavy geometry payload.
+ * Rows merge into the project's accumulating store via id-based dedupe.
+ * Returns the *full accumulated array* for the project (filtered by
+ * site if requested), not just the new rows — that lets the caller
+ * `setHabitats(returnedArray)` and let React's reconciler diff against
+ * the previous snapshot. New polygons appear, existing ones stay
+ * mounted, nothing flickers.
+ *
+ * Offline behaviour: bbox is ignored (we don't run PostGIS client-side);
+ * we read whatever's in `cached_habitats` for the project and merge it
+ * in. Acceptable trade-off — offline open shows everything that was
+ * previously cached, then the next online bbox call refines.
+ *
+ * Errors swallow into a cache fallback so the layer is non-critical.
+ */
+export async function fetchHabitatsInBbox(
+  projectId: string,
+  siteId: string | null,
+  bbox: HabitatBbox,
+  options?: { limit?: number; signal?: AbortSignal },
+): Promise<HabitatPolygon[]> {
+  const limit = options?.limit ?? 500;
+  const isOnline = await probeOnlineState();
+  if (!isOnline) {
+    const cached = await readFromCache(projectId, siteId ?? null);
+    mergeIntoStore(projectId, cached);
+    return getHabitatsForProject(projectId, siteId ?? null);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+  // Forward the caller's abort signal — the screen cancels in-flight
+  // fetches when its component unmounts mid-pan, so we don't waste a
+  // whole RPC round-trip on stale state.
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+  try {
+    const { data, error } = await supabase
+      .rpc("get_habitats_in_bbox", {
+        p_project_id: projectId,
+        p_site_id: siteId,
+        p_min_lng: bbox.minLng,
+        p_min_lat: bbox.minLat,
+        p_max_lng: bbox.maxLng,
+        p_max_lat: bbox.maxLat,
+        p_limit: limit,
+      })
+      .abortSignal(controller.signal);
+    if (error) throw error;
+    const rows = Array.isArray(data) ? (data as RpcHabitatRow[]) : [];
+    const habitats = rows.map(rowToHabitat);
+    if (__DEV__) {
+      let totalVertices = 0;
+      for (const h of habitats) totalVertices += countGeometryVertices(h.boundary);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[habitats] bbox fetch → ${habitats.length} rows, ${totalVertices} vertices`,
+      );
+    }
+    mergeIntoStore(projectId, habitats);
+    // Fire-and-forget cache write. Append-mode (not replace) so earlier
+    // bbox fetches' boundaries survive — the user might pan back to that
+    // area offline, and we want their previous data still rendering.
+    void appendCachedHabitatBoundaries(
+      projectId,
+      habitats.map((h) => ({ id: h.id, boundary: h.boundary ?? null })),
+    ).catch(() => { /* non-fatal */ });
+    return getHabitatsForProject(projectId, siteId ?? null);
+  } catch {
+    const cached = await readFromCache(projectId, siteId ?? null);
+    mergeIntoStore(projectId, cached);
+    return getHabitatsForProject(projectId, siteId ?? null);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Explicit "Show all" path — fetches every habitat for a project via the
+ * legacy `get_project_habitats` RPC. Only the Habitats list's "Show all"
+ * button calls this; the map and the list's default state both go
+ * through `fetchHabitatsInBbox`.
+ *
+ * Behaves like the bbox fetcher in terms of caching: rows merge into
+ * the same store (id-based dedupe), so calling this after a bunch of
+ * bbox pans simply tops up the missing rows. The boundary cache write
+ * is replace-mode (project-wide) since a "Show all" call is by
+ * definition the authoritative project snapshot.
  */
 export async function fetchProjectHabitats(
   projectId: string,
   siteId?: string | null,
+  options?: { forceRefresh?: boolean },
 ): Promise<HabitatPolygon[]> {
-  let isOnline = useNetworkStore.getState().isOnline;
-  if (!isOnline) {
-    try {
-      const NetInfo = (await import("@react-native-community/netinfo")).default;
-      const state = await NetInfo.fetch();
-      const probedOnline =
-        state.isInternetReachable === true ||
-        (state.isInternetReachable === null && state.isConnected === true);
-      if (probedOnline) {
-        isOnline = true;
-        useNetworkStore.getState().setOnline(true);
-      }
-    } catch { /* probe failed — keep pessimistic value */ }
+  if (!options?.forceRefresh) {
+    const inflight = showAllInFlight.get(projectId);
+    if (inflight) {
+      const rows = await inflight;
+      return siteId
+        ? rows.filter((h) => h.site_id === siteId || h.site_id === null)
+        : rows;
+    }
   }
+  const promise = doFetchAllProjectHabitats(projectId)
+    .then((rows) => {
+      mergeIntoStore(projectId, rows);
+      showAllInFlight.delete(projectId);
+      return rows;
+    })
+    .catch((err) => {
+      showAllInFlight.delete(projectId);
+      throw err;
+    });
+  showAllInFlight.set(projectId, promise);
+  await promise;
+  return getHabitatsForProject(projectId, siteId ?? null);
+}
+
+async function doFetchAllProjectHabitats(projectId: string): Promise<HabitatPolygon[]> {
+  const isOnline = await probeOnlineState();
   if (!isOnline) {
-    return readFromCache(projectId, siteId ?? null);
+    return readFromCache(projectId, null);
   }
 
   const controller = new AbortController();
@@ -103,27 +382,21 @@ export async function fetchProjectHabitats(
     const { data, error } = await supabase
       .rpc("get_project_habitats", {
         p_project_id: projectId,
-        p_site_id: siteId ?? null,
+        p_site_id: null,
       })
       .abortSignal(controller.signal);
     if (error) throw error;
     const rows = Array.isArray(data) ? (data as RpcHabitatRow[]) : [];
     const habitats = rows.map(rowToHabitat);
-    // Persist geometry alongside the row id so the map can re-render
-    // offline. The metadata side of the cache is filled by cacheAllData;
-    // only boundaries live here so a metadata refresh doesn't clobber the
-    // potentially-large geometry payload.
-    if (!siteId) {
-      // Site-scoped queries are a subset — never overwrite the project-wide
-      // cache with them. Only project-wide fetches refresh the boundary cache.
-      await setCachedHabitatBoundaries(
-        projectId,
-        habitats.map((h) => ({ id: h.id, boundary: h.boundary ?? null })),
-      );
-    }
+    // Replace-mode write — "Show all" is the project-wide snapshot, so
+    // it's authoritative and supersedes any partial bbox data on disk.
+    void setCachedHabitatBoundaries(
+      projectId,
+      habitats.map((h) => ({ id: h.id, boundary: h.boundary ?? null })),
+    ).catch(() => { /* non-fatal */ });
     return habitats;
   } catch {
-    return readFromCache(projectId, siteId ?? null);
+    return readFromCache(projectId, null);
   } finally {
     clearTimeout(timeoutId);
   }
@@ -188,8 +461,50 @@ export interface HabitatRenderPiece {
   holes: Array<Array<{ latitude: number; longitude: number }>>;
 }
 
-function ringToCoords(ring: number[][]): Array<{ latitude: number; longitude: number }> {
+function ringToCoords(
+  ring: number[][],
+  maxVertices?: number,
+): Array<{ latitude: number; longitude: number }> {
+  // Optional uniform-stride decimation. Habitat polygons coming back
+  // from PostGIS are simplified at ~5 m server-side, but heavy cadastral
+  // imports still produce rings with hundreds of vertices each — and the
+  // dominant cost on iOS is bridge serialization of those vertices, not
+  // the polygon count. Capping at ~64 vertices/ring drops bridge payload
+  // by 10-30× on these projects with no visible quality loss at typical
+  // surveyor zoom levels (a 64-gon is indistinguishable from a 1000-gon
+  // when the polygon is < 200 px wide).
+  //
+  // Uniform stride is crude vs. Douglas-Peucker but is O(N) and good
+  // enough for a read-only display layer.
   const out: Array<{ latitude: number; longitude: number }> = [];
+  if (
+    typeof maxVertices === "number" &&
+    maxVertices > 0 &&
+    ring.length > maxVertices
+  ) {
+    const step = ring.length / maxVertices;
+    for (let i = 0; i < maxVertices; i++) {
+      const c = ring[Math.floor(i * step)];
+      if (Array.isArray(c) && c.length >= 2) {
+        out.push({ longitude: c[0], latitude: c[1] });
+      }
+    }
+    // Close the ring — skipped if the source ring's first/last coincide,
+    // which they always do for valid GeoJSON polygons but check anyway.
+    const last = ring[ring.length - 1];
+    if (Array.isArray(last) && last.length >= 2) {
+      const first = out[0];
+      const lastPoint = out[out.length - 1];
+      if (
+        first &&
+        lastPoint &&
+        (first.latitude !== lastPoint.latitude || first.longitude !== lastPoint.longitude)
+      ) {
+        out.push({ longitude: last[0], latitude: last[1] });
+      }
+    }
+    return out;
+  }
   for (const c of ring) {
     if (Array.isArray(c) && c.length >= 2) {
       out.push({ longitude: c[0], latitude: c[1] });
@@ -198,25 +513,170 @@ function ringToCoords(ring: number[][]): Array<{ latitude: number; longitude: nu
   return out;
 }
 
-export function habitatPolygonPieces(geometry: HabitatGeometry | null | undefined): HabitatRenderPiece[] {
+export function habitatPolygonPieces(
+  geometry: HabitatGeometry | null | undefined,
+  options?: { maxVerticesPerRing?: number },
+): HabitatRenderPiece[] {
+  const max = options?.maxVerticesPerRing;
   if (!geometry) return [];
   if (geometry.type === "Polygon") {
     if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length === 0) return [];
-    const outer = ringToCoords(geometry.coordinates[0]);
+    const outer = ringToCoords(geometry.coordinates[0], max);
     if (outer.length === 0) return [];
-    const holes = geometry.coordinates.slice(1).map(ringToCoords).filter((h) => h.length > 0);
+    const holes = geometry.coordinates
+      .slice(1)
+      .map((r) => ringToCoords(r, max))
+      .filter((h) => h.length > 0);
     return [{ outer, holes }];
   }
   if (!Array.isArray(geometry.coordinates)) return [];
   const pieces: HabitatRenderPiece[] = [];
   for (const part of geometry.coordinates) {
     if (!Array.isArray(part) || part.length === 0) continue;
-    const outer = ringToCoords(part[0]);
+    const outer = ringToCoords(part[0], max);
     if (outer.length === 0) continue;
-    const holes = part.slice(1).map(ringToCoords).filter((h) => h.length > 0);
+    const holes = part
+      .slice(1)
+      .map((r) => ringToCoords(r, max))
+      .filter((h) => h.length > 0);
     pieces.push({ outer, holes });
   }
   return pieces;
+}
+
+/**
+ * Bounding-box span (degrees) of a habitat geometry — the larger of its
+ * width and height. Powers the zoom-aware "skip when tiny" cull on the
+ * project map: a polygon whose bbox is smaller than ~6 screen pixels at
+ * the current zoom is invisible noise to the user, and mounting it
+ * through the native bridge is the dominant cost on heavy projects (the
+ * cadastral-import outlier with 600+ polygons stalled the JS thread for
+ * 15+ seconds without this filter). Returns null for empty / missing /
+ * unsupported geometry — caller should treat null as "render anyway"
+ * (better to draw a polygon we can't size than drop it silently).
+ */
+/**
+ * Full bbox (min/max lng/lat) of a habitat geometry. Pre-computed once
+ * per polygon at habitat-fetch time and reused on every viewport change
+ * for the AABB intersect test that gates rendering — without this, the
+ * accumulating module store would render every polygon the user has
+ * ever panned past, defeating viewport-bound loading.
+ *
+ * Returns null for empty / unsupported geometry — caller treats null as
+ * "render anyway" (no bbox → can't safely cull).
+ */
+export function habitatGeometryBbox(
+  geometry: HabitatGeometry | null | undefined,
+): HabitatBbox | null {
+  if (!geometry) return null;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  const visit = (rings: number[][][] | undefined): void => {
+    if (!Array.isArray(rings)) return;
+    for (const ring of rings) {
+      if (!Array.isArray(ring)) continue;
+      for (const c of ring) {
+        if (!Array.isArray(c) || c.length < 2) continue;
+        const lng = c[0];
+        const lat = c[1];
+        if (typeof lng !== "number" || typeof lat !== "number") continue;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+    }
+  };
+  if (geometry.type === "Polygon") {
+    visit(geometry.coordinates);
+  } else if (geometry.type === "MultiPolygon") {
+    for (const part of geometry.coordinates) {
+      if (Array.isArray(part)) visit(part);
+    }
+  } else {
+    return null;
+  }
+  if (!isFinite(minLng) || !isFinite(maxLng)) return null;
+  return { minLng, minLat, maxLng, maxLat };
+}
+
+/**
+ * Total vertex count across a polygon / multipolygon, used for the
+ * dev-only measurement log on bbox fetches. Heavy projects with sub-5m
+ * cadastral lines hit huge vertex counts even after server-side
+ * simplification — knowing the actual number is what tells us whether
+ * coordinate decimation or stricter caps are worth chasing.
+ */
+function countGeometryVertices(geometry: HabitatGeometry | null | undefined): number {
+  if (!geometry) return 0;
+  let total = 0;
+  const visit = (rings: number[][][] | undefined): void => {
+    if (!Array.isArray(rings)) return;
+    for (const ring of rings) {
+      if (Array.isArray(ring)) total += ring.length;
+    }
+  };
+  if (geometry.type === "Polygon") {
+    visit(geometry.coordinates);
+  } else if (geometry.type === "MultiPolygon") {
+    for (const part of geometry.coordinates) {
+      if (Array.isArray(part)) visit(part);
+    }
+  }
+  return total;
+}
+
+/**
+ * Axis-aligned bbox intersect test — true if `a` and `b` share any
+ * area. The cheap (no PostGIS) viewport filter on the project map
+ * uses this to drop polygons that aren't on screen.
+ */
+export function bboxesIntersect(a: HabitatBbox, b: HabitatBbox): boolean {
+  return !(
+    a.maxLng < b.minLng ||
+    a.minLng > b.maxLng ||
+    a.maxLat < b.minLat ||
+    a.minLat > b.maxLat
+  );
+}
+
+export function habitatBboxSpanDegrees(
+  geometry: HabitatGeometry | null | undefined,
+): number | null {
+  if (!geometry) return null;
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  const visit = (rings: number[][][] | undefined): void => {
+    if (!Array.isArray(rings)) return;
+    for (const ring of rings) {
+      if (!Array.isArray(ring)) continue;
+      for (const c of ring) {
+        if (!Array.isArray(c) || c.length < 2) continue;
+        const lng = c[0];
+        const lat = c[1];
+        if (typeof lng !== "number" || typeof lat !== "number") continue;
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+    }
+  };
+  if (geometry.type === "Polygon") {
+    visit(geometry.coordinates);
+  } else if (geometry.type === "MultiPolygon") {
+    for (const part of geometry.coordinates) {
+      if (Array.isArray(part)) visit(part);
+    }
+  } else {
+    return null;
+  }
+  if (!isFinite(minLng) || !isFinite(maxLng)) return null;
+  return Math.max(maxLng - minLng, maxLat - minLat);
 }
 
 /**

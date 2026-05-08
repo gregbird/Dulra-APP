@@ -179,8 +179,41 @@ export interface RenderPiece {
   holes: Array<Array<{ latitude: number; longitude: number }>>;
 }
 
-function ringToCoords(ring: number[][]): Array<{ latitude: number; longitude: number }> {
+function ringToCoords(
+  ring: number[][],
+  maxVertices?: number,
+): Array<{ latitude: number; longitude: number }> {
   const out: Array<{ latitude: number; longitude: number }> = [];
+  if (
+    typeof maxVertices === "number" &&
+    maxVertices > 0 &&
+    ring.length > maxVertices
+  ) {
+    // Uniform-stride decimation — same approach as habitats.ts. NPWS
+    // designated sites can be county-spanning with thousands of vertices
+    // each; on iOS the bridge serialization of those is the dominant
+    // cost when the map opens. Capping at ~96 keeps boundary readable.
+    const step = ring.length / maxVertices;
+    for (let i = 0; i < maxVertices; i++) {
+      const c = ring[Math.floor(i * step)];
+      if (Array.isArray(c) && c.length >= 2) {
+        out.push({ longitude: c[0], latitude: c[1] });
+      }
+    }
+    const last = ring[ring.length - 1];
+    if (Array.isArray(last) && last.length >= 2) {
+      const first = out[0];
+      const lastPoint = out[out.length - 1];
+      if (
+        first &&
+        lastPoint &&
+        (first.latitude !== lastPoint.latitude || first.longitude !== lastPoint.longitude)
+      ) {
+        out.push({ longitude: last[0], latitude: last[1] });
+      }
+    }
+    return out;
+  }
   for (const c of ring) {
     if (Array.isArray(c) && c.length >= 2) {
       out.push({ longitude: c[0], latitude: c[1] });
@@ -199,13 +232,20 @@ function ringToCoords(ring: number[][]): Array<{ latitude: number; longitude: nu
  * Inner rings (holes) survive: 22% of saved polygons have holes, and
  * dropping them would falsely paint lakes/inlets as protected ground.
  */
-export function polygonsForRender(geometry: DesignatedGeometry | null): RenderPiece[] {
+export function polygonsForRender(
+  geometry: DesignatedGeometry | null,
+  options?: { maxVerticesPerRing?: number },
+): RenderPiece[] {
+  const max = options?.maxVerticesPerRing;
   if (!geometry) return [];
   if (geometry.type === "Polygon") {
     if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length === 0) return [];
-    const outer = ringToCoords(geometry.coordinates[0]);
+    const outer = ringToCoords(geometry.coordinates[0], max);
     if (outer.length === 0) return [];
-    const holes = geometry.coordinates.slice(1).map(ringToCoords).filter((h) => h.length > 0);
+    const holes = geometry.coordinates
+      .slice(1)
+      .map((r) => ringToCoords(r, max))
+      .filter((h) => h.length > 0);
     return [{ outer, holes }];
   }
   // MultiPolygon — each part is its own [outer, ...inner] ring set
@@ -213,9 +253,12 @@ export function polygonsForRender(geometry: DesignatedGeometry | null): RenderPi
   const pieces: RenderPiece[] = [];
   for (const part of geometry.coordinates) {
     if (!Array.isArray(part) || part.length === 0) continue;
-    const outer = ringToCoords(part[0]);
+    const outer = ringToCoords(part[0], max);
     if (outer.length === 0) continue;
-    const holes = part.slice(1).map(ringToCoords).filter((h) => h.length > 0);
+    const holes = part
+      .slice(1)
+      .map((r) => ringToCoords(r, max))
+      .filter((h) => h.length > 0);
     pieces.push({ outer, holes });
   }
   return pieces;
