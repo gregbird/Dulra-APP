@@ -176,7 +176,16 @@ const MIN_HABITAT_RENDER_ZOOM = 14;
 // slightly higher because NLC parcels are typically smaller and the
 // user expects denser coverage at z >= 16. See plan § 4.
 const MAX_NLC_POLYGONS = Platform.OS === "ios" ? 200 : 1000;
-const MAX_NLC_VERTICES_PER_RING = Platform.OS === "ios" ? 32 : undefined;
+// No decimation for NLC. Web team's Maynooth pre-flight measured
+// ~30.7 vertices per ring on average post-quantization, so a 32-vertex
+// stride cap was clipping the small minority of complex rings (long
+// hedgerows, building cluster outlines) and producing the "triangle
+// artifact" the layer was supposed to eliminate. With cap=200 polygons
+// and ~30 avg vertices, total bridge payload is ~100 KB even
+// uncapped — well inside iOS's bandwidth. If we ever see freezes
+// here again, set this to ~128 (covers >99% of rings cleanly) or
+// switch to Douglas-Peucker simplification instead of stride.
+const MAX_NLC_VERTICES_PER_RING: number | undefined = undefined;
 
 // Labels for NLC parcels show only at z >= 17 — at z 16 viewports are
 // wide enough that the LEVEL_2_ID density would re-introduce Marker
@@ -438,14 +447,19 @@ export default function ProjectMapScreen() {
     if (!habitatsEnabled) return "none";
     if (currentZoom == null) return "none";
     if (currentZoom < MIN_HABITAT_RENDER_ZOOM) return "none";
-    // z >= 16 normally hands off to NLC, but the user can opt out via
-    // the Layers panel toggle (web parity — the NLC button toggles
-    // independent of the saved-habitat one). With NLC disabled we
-    // continue to render the saved-habitat layer at high zoom; user
-    // sees the simplified reference instead of the detailed Esri data.
     if (currentZoom < MIN_NLC_RENDER_ZOOM) return "habitats";
-    return nlcEnabled ? "nlc" : "habitats";
+    // z >= 16: NLC takes over. With NLC disabled we render NOTHING
+    // — falling back to the saved-habitat layer here surfaces its
+    // 5 m server-side simplification as visible TIN-style triangle
+    // segments at this zoom (saved habitat geometry is smoothed for
+    // overview, not parcel-level inspection). User intent for
+    // turning NLC off at high zoom is "no reference clutter"; we
+    // honour that literally. They can zoom out below 16 to see
+    // saved habitats, or turn NLC back on for the high-quality
+    // reference layer.
+    return nlcEnabled ? "nlc" : "none";
   }, [habitatsEnabled, nlcEnabled, currentZoom]);
+
   // Skip viewport-driven fetches during the initial fitToCoordinates
   // animation (~1.5 s). iOS fires regionChangeComplete multiple times
   // during the camera fit and each fire kicked off a fresh bbox RPC,
