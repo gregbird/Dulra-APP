@@ -1,82 +1,94 @@
 /**
- * NLC LEVEL_2_ID → fill colour mapping.
+ * NLC LEVEL_2_VALUE → fill colour mapping.
  *
- * **Provisional palette** — to be replaced with the canonical
- * `NLC_NATIVE_LEVEL2_COLORS` map from the web repo's
- * `lib/external-apis/osi.ts`. Web team to share the exact RGB values
- * during Phase 1 review so we maintain visual parity. Until then this
- * approximates Heritage Council / NLC 2018 native scheme conventions
- * (greens for grassland/woodland, browns for peat/heath, blues for
- * water, reds/oranges for built-up, greys for bare ground).
+ * Canonical Esri "native" palette ported from the web repo's
+ * `lib/external-apis/osi.ts` (NLC_NATIVE_LEVEL2_COLORS), itself sourced
+ * from Tailte Éireann FeatureServer's own
+ * `drawingInfo.uniqueValueInfos` payload.
+ *
+ * **Important — keyed by LEVEL_2_VALUE (human-readable name), not
+ * LEVEL_2_ID.** Web team flagged this during the Phase 1 pre-flight: the
+ * FeatureServer returns inconsistent case across LEVEL_1_VALUE and
+ * sometimes across LEVEL_2_VALUE too, so the caller MUST pass the
+ * server-returned string verbatim — no normalisation, no lower-casing.
  *
  * Codes that don't appear in this map render with `NLC_FALLBACK_COLOR`.
- * Surveyors will see grey for any unmapped code, which is correct
- * behaviour — the Habitats list still surfaces the LEVEL_2_VALUE text.
+ * Surveyors will see grey for any unknown code, which is correct
+ * fallback behaviour — the Habitats list still surfaces the
+ * LEVEL_2_VALUE text.
  */
 
 export const NLC_FALLBACK_COLOR = "#9ca3af";
 
+/**
+ * Canonical native palette, 35 entries. Keep in sync with web's
+ * NLC_NATIVE_LEVEL2_COLORS — both repos source from the same
+ * FeatureServer drawingInfo so any change must land in both places.
+ */
 export const NLC_LEVEL2_COLORS: Record<string, string> = {
-  // Forest, woodland and scrub
-  WL1: "#2f6f3a",
-  WL2: "#3a8146",
-  WL3: "#4a9758",
-  WL4: "#5fad6c",
-  WL5: "#75c082",
-  WS1: "#6b8e3a",
-  WS2: "#7ea34a",
-  WS3: "#92b85c",
-
-  // Grassland, saltmarsh and swamp
-  GA1: "#b6d472",
-  GA2: "#a3c95e",
-  GS1: "#90be4c",
-  GS2: "#7fb43c",
-  GM1: "#6fa92e",
-  CW1: "#a3b370",
-  CM1: "#8fa05a",
-
-  // Heath and bog
-  HH1: "#7c5e9a",
-  HH2: "#8e6fab",
-  HH3: "#9f80bc",
-  HD1: "#6f527d",
-  PB1: "#5a4233",
-  PB2: "#6e533f",
-  PB3: "#82644b",
-  PB4: "#967558",
-
-  // Freshwater
-  FW1: "#3a82d6",
-  FW2: "#5294e0",
-  FL1: "#1f6cc4",
-  FL2: "#3580d2",
-  FP1: "#4f8fdd",
-  FS1: "#669be3",
-
-  // Coastal / marine
-  CC1: "#d8c98a",
-  CC2: "#cdbb78",
-  CB1: "#bba968",
-  CS1: "#e6d9a2",
-  MR1: "#1851a8",
-
-  // Exposed rock and disturbed ground
-  ER1: "#9b9b9b",
-  ER2: "#aeaeae",
-  ER3: "#c2c2c2",
-  ED1: "#86796b",
-  ED2: "#9a8b7c",
-
-  // Cultivated and built land
-  CL1: "#e5b86a",
-  CL2: "#d6a955",
-  BL1: "#d36b4e",
-  BL2: "#c25840",
-  BL3: "#a84432",
+  "Amenity Grassland": "#a2f14f",
+  "Artificial Waterbodies": "#004da8",
+  "Bare Peat": "#846044",
+  "Bare Soil and Disturbed Ground": "#4a2d00",
+  "Blanket Bog": "#a87000",
+  Bracken: "#f4c7da",
+  "Broadleaved Forest and Woodland": "#6bad00",
+  Buildings: "#ff2d35",
+  "Burnt Areas": "#e6a700",
+  "Coastal Sediments": "#f9f382",
+  "Coniferous Forest": "#265000",
+  "Cultivated Land": "#ffffac",
+  "Cutover Bog": "#d49676",
+  "Dry Grassland": "#def3cc",
+  "Dry Heath": "#c190d0",
+  "Exposed Rock and Sediments": "#819498",
+  Fens: "#cdf57a",
+  Hedgerows: "#81516b",
+  "Improved Grassland": "#7ccc59",
+  "Lakes and Ponds": "#0099ff",
+  "Marine Water": "#bdf2ff",
+  "Mixed Forest": "#507c00",
+  Mudflats: "#d0c29e",
+  "Other Artificial Surfaces": "#dcdcdc",
+  "Raised Bog": "#732600",
+  "Rivers and Streams": "#73b2ff",
+  "Salt Marsh": "#afb400",
+  "Sand Dunes": "#ecff2e",
+  Scrub: "#a0d023",
+  Swamp: "#cdaa66",
+  "Transitional Forest": "#7a8f21",
+  "Transitional Waterbodies": "#73dfff",
+  Treelines: "#e8e762",
+  Ways: "#808a8c",
+  "Wet Grassland": "#38a800",
+  "Wet Heath": "#7d00a2",
 };
 
-export function nlcColorFor(level2Id: string | null | undefined): string {
-  if (!level2Id) return NLC_FALLBACK_COLOR;
-  return NLC_LEVEL2_COLORS[level2Id] ?? NLC_FALLBACK_COLOR;
+/**
+ * Heritage Council Level-1 fallback palette. NOT used in v1 — kept
+ * here so the Phase 4 palette toggle has both options ready.
+ *
+ * **Case sensitivity warning**: the FeatureServer returns LEVEL_1_VALUE
+ * with inconsistent case (e.g. "GRASSLAND, SALTMARSH and SWAMP" — note
+ * lowercase "and"). Match exactly as returned; do not normalise.
+ */
+export const NLC_LEVEL1_COLORS: Record<string, string> = {
+  "ARTIFICIAL SURFACES": "#DC2626",
+  "CULTIVATED LAND": "#808080",
+  "FOREST, WOODLAND AND SCRUB": "#228B22",
+  "GRASSLAND, SALTMARSH and SWAMP": "#FFD700",
+  PEATLAND: "#9B59B6",
+  "HEATH and BRACKEN": "#8B4513",
+  WATERBODIES: "#87CEEB",
+  "EXPOSED SURFACES": "#DC2626",
+};
+
+/**
+ * Resolve a Level-2 fill colour. Caller passes the server-returned
+ * `LEVEL_2_VALUE` string verbatim — no normalisation. Unknown values
+ * fall through to NLC_FALLBACK_COLOR.
+ */
+export function nlcColorFor(level2Value: string | null | undefined): string {
+  if (!level2Value) return NLC_FALLBACK_COLOR;
+  return NLC_LEVEL2_COLORS[level2Value] ?? NLC_FALLBACK_COLOR;
 }

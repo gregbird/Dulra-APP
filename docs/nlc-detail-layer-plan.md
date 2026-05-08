@@ -1,6 +1,9 @@
 # NLC reference layer (z ≥ 16) — Mobile implementation plan
 
-**Status**: web-team reviewed; corrections applied. Ready for Phase 1.
+**Status**: Phase 1 + 2 implemented (commit `1cdb6f3`). Phase 1 smoke
+test resolved by web-team empirical pre-flight (see § 11 v3 changelog).
+GeoJSON quantization confirmed vertex-perfect with PBF; canonical colour
+palette delivered. Ready for device test then Phase 3.
 **Scope**: bring the web's `viewport-habitat-detail.tsx` z ≥ 16 NLC reference
 layer to the mobile project map.
 **Why**: above z 16 the saved-habitat polygons (server-side simplified at ~5 m
@@ -420,6 +423,31 @@ deviations in § 3 / § 7.
 
 ## 11. Changelog
 
+- **v3** — empirical pre-flight by web team (Phase 1 unknowns resolved):
+  - **Quantization parity confirmed.** Web ran the same Maynooth
+    bbox (lng -6.5944 → -6.5869, lat 53.3795 → 53.3840, ~500 m × 500 m)
+    in both `f=geojson` and `f=pbf` with identical
+    `quantizationParameters`. Result: 508 features, 689 rings, 21,178
+    vertices — byte-identical between the two formats. PBF v1.1
+    escalation **off the table**; mobile ships GeoJSON.
+  - **Payload ratio observed**: PBF 80 KB vs GeoJSON 880 KB on this
+    bbox (≈11×, not the 35× from the original spec). Density
+    dependent, but enough to confirm GeoJSON is bounded for v1.
+  - **Z 16 threshold confirmed for mobile.** Reasoning is
+    meters-per-pixel, not screen px. At lat 53° N, z 16 = ~1.44 m/px;
+    a 5 m building reads as ~3.5 px (visible). Dropping to z 15
+    halves m/px so the same building falls below 2 px. Plan § 9 Q7
+    answered: **stay at 16**.
+  - **`exceededTransferLimit` location**: under `properties` in
+    GeoJSON mode, top-level in PBF mode. Already covered by
+    `lib/nlc.ts` reading both locations + `features.length` fallback.
+  - **`NLC_NATIVE_LEVEL2_COLORS` canonical map delivered** (35
+    entries). Keyed by `LEVEL_2_VALUE` (human-readable name), **not**
+    `LEVEL_2_ID`. Server returns inconsistent case across some values;
+    callers must match verbatim, no normalisation. Implemented in
+    `src/lib/nlc-colors.ts`.
+  - **Heritage Council Level-1 palette** also provided for the Phase 4
+    toggle. Stored alongside the native map.
 - **v2.1** — pre-Phase-1 polish:
   - § 2: flagged the GeoJSON pagination-signal unknown alongside the
     quantization unknown. Smoke test now covers both.

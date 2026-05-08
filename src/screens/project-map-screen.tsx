@@ -1066,7 +1066,11 @@ export default function ProjectMapScreen() {
         nlcPiecesCacheRef.current.set(feature.id, piecesWithBbox);
       }
       if (piecesWithBbox.length === 0) continue;
-      const fill = nlcColorFor(feature.level2Id);
+      // Color map is keyed by LEVEL_2_VALUE (server's human-readable
+      // name), not LEVEL_2_ID. Web team flagged this during Phase 1
+      // pre-flight — pass through verbatim, no normalisation, since
+      // the FeatureServer returns inconsistent case across some values.
+      const fill = nlcColorFor(feature.level2Value);
       const stroke = darkenHex(fill, 0.65);
       for (let idx = 0; idx < piecesWithBbox.length; idx++) {
         if (out.length >= MAX_NLC_POLYGONS) {
