@@ -122,7 +122,19 @@ const SCREEN_WIDTH = Dimensions.get("window").width;
 // polygon mount (and we can stop chasing that lead). Android stays loose
 // because Google Maps batches overlay adds natively.
 const MAX_HABITAT_POLYGONS = Platform.OS === "ios" ? 20 : 500;
-const MAX_VERTICES_PER_RING = Platform.OS === "ios" ? 32 : undefined;
+// No client-side decimation. Server already returns saved habitats
+// simplified at ~5 m (`ST_SimplifyPreservetopology(0.00005)`); throwing
+// further vertices away at the client made the high-zoom angular
+// segments worse — a 60-vertex source polygon was being stride-cut to
+// 32, producing visible triangles where there were none in the source.
+// The 20-polygon render cap keeps total bridge load bounded
+// (20 polygons × ~60 verts ≈ 1.2k verts — trivial on iOS) so removing
+// decimation is free in perf terms.
+//
+// Real fix for the residual triangle artifact at z >= 17 needs a
+// backend tolerance parameter on get_habitats_in_bbox so mobile can
+// request finer simplification at parcel zoom — queued for web team.
+const MAX_VERTICES_PER_RING: number | undefined = undefined;
 // On iOS we also drop holes (donut shapes become solid fills) and
 // tappable hit-tests for habitats. Hit-test region construction scales
 // with vertex count and overlay count — disabling it cuts a chunk of
