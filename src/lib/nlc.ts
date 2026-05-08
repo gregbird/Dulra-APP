@@ -360,6 +360,56 @@ function rowToFeature(row: ArcGisGeoJsonFeature): NlcFeature | null {
 }
 
 /**
+ * Point-in-polygon test (ray-casting). Used by the JS-side hit test
+ * on iOS where the NLC layer renders without `tappable` (native
+ * hit-test region build is dropped to keep the bridge cost down — see
+ * plan § 6 / commit 02859c2 post-mortem). Caller should bbox-cull
+ * pieces first; PIP is O(N) on the ring length.
+ *
+ * Coordinate convention: ring vertices are `{ latitude, longitude }`
+ * pairs as we already store them in the screen's piece cache, so this
+ * helper accepts that shape directly.
+ */
+export function pointInRing(
+  point: { latitude: number; longitude: number },
+  ring: ReadonlyArray<{ latitude: number; longitude: number }>,
+): boolean {
+  if (ring.length < 3) return false;
+  let inside = false;
+  const x = point.longitude;
+  const y = point.latitude;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i].longitude;
+    const yi = ring[i].latitude;
+    const xj = ring[j].longitude;
+    const yj = ring[j].latitude;
+    const intersect =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Simple centroid of a closed ring — average of vertex coords. Good
+ * enough for label anchoring at typical parcel scales; we don't need
+ * the area-weighted centroid for visual placement.
+ */
+export function centroidOfRing(
+  ring: ReadonlyArray<{ latitude: number; longitude: number }>,
+): { latitude: number; longitude: number } | null {
+  if (ring.length === 0) return null;
+  let lat = 0;
+  let lng = 0;
+  for (const p of ring) {
+    lat += p.latitude;
+    lng += p.longitude;
+  }
+  return { latitude: lat / ring.length, longitude: lng / ring.length };
+}
+
+/**
  * Compose multiple AbortSignals into one. The standard library only
  * shipped `AbortSignal.any` in 2024 and React Native's runtime hasn't
  * caught up uniformly — this hand-rolled version works on every JS

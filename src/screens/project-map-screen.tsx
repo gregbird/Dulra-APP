@@ -11,7 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Polygon, PROVIDER_DEFAULT, UrlTile, type Region } from "react-native-maps";
+import MapView, { Marker, Polygon, PROVIDER_DEFAULT, UrlTile, type MapPressEvent, type Region } from "react-native-maps";
 import { Paths } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -62,11 +62,14 @@ import {
 import {
   fetchNlcInBbox,
   bboxToBinKey as bboxToNlcBinKey,
+  centroidOfRing,
+  pointInRing,
   MIN_NLC_RENDER_ZOOM,
   type NlcBbox,
   type NlcFeature,
 } from "@/lib/nlc";
 import { nlcColorFor } from "@/lib/nlc-colors";
+import NlcDetailModal from "@/components/nlc-detail-modal";
 import { getFossittColor } from "@/lib/fossitt-utils";
 import { UNCLASSIFIED_HABITAT_COLOR, type HabitatPolygon } from "@/types/habitat";
 import {
@@ -174,6 +177,14 @@ const MIN_HABITAT_RENDER_ZOOM = 14;
 const MAX_NLC_POLYGONS = Platform.OS === "ios" ? 200 : 1000;
 const MAX_NLC_VERTICES_PER_RING = Platform.OS === "ios" ? 32 : undefined;
 
+// Labels for NLC parcels show only at z >= 17 — at z 16 viewports are
+// wide enough that the LEVEL_2_ID density would re-introduce Marker
+// bridge cost issues. At z 17 we typically see ~5 distinct codes at a
+// time, so the cost is bounded. Anti-duplicate rule from web spec:
+// only the largest polygon per LEVEL_2_ID gets a label.
+const MIN_NLC_LABEL_ZOOM = 17;
+const MAX_NLC_LABELS = 15;
+
 // Stacking order for overlays. Android Google Maps draws by zIndex (default
 // 0 = undefined order between overlays at same level), so without explicit
 // values a UrlTile prop change would let the tile render above polygons —
@@ -245,6 +256,7 @@ export default function ProjectMapScreen() {
   const [nlcFeatures, setNlcFeatures] = useState<NlcFeature[]>([]);
   const lastNlcBinKeyRef = useRef<string | null>(null);
   const nlcAbortRef = useRef<AbortController | null>(null);
+  const [selectedNlc, setSelectedNlc] = useState<NlcFeature | null>(null);
   // Live zoom span in degrees (the camera's longitudeDelta), updated only
   // on significant zoom changes — see handleRegionChangeComplete. Drives
   // the skip-when-tiny cull below. Null until the first regionChange
@@ -785,6 +797,47 @@ export default function ProjectMapScreen() {
     }
   };
 
+  // Tap → JS-side hit test against the visible NLC piece cache. We use
+  // MapView.onPress (instead of per-polygon `tappable` on iOS) because
+  // the native hit-test region build for hundreds of polygons was the
+  // hidden half of the iOS freeze pre-commit-02859c2 — see plan § 6.
+  // On Android the per-polygon onPress fires too (HABITAT_TAPPABLE
+  // is true), so we early-return here to avoid double-fire on a single
+  // tap.
+  const handleMapPress = (e: MapPressEvent) => {
+    if (Platform.OS !== "ios") return;
+    if (layerMode !== "nlc" || nlcFeatures.length === 0) return;
+    const coord = e.nativeEvent.coordinate;
+    if (!coord) return;
+    // Walk the visible features; pick the smallest matching polygon
+    // (by area) so a tap on overlapping parcel edges resolves to the
+    // most specific (innermost) parcel. bbox-cull first, PIP only when
+    // bbox contains the point.
+    let best: NlcFeature | null = null;
+    let bestArea = Infinity;
+    for (const feature of nlcFeatures) {
+      const cached = nlcPiecesCacheRef.current.get(feature.id);
+      if (!cached) continue;
+      for (const { piece, bbox } of cached) {
+        if (!bbox) continue;
+        if (
+          coord.longitude < bbox.minLng ||
+          coord.longitude > bbox.maxLng ||
+          coord.latitude < bbox.minLat ||
+          coord.latitude > bbox.maxLat
+        ) continue;
+        if (pointInRing(coord, piece.outer)) {
+          const area = feature.area ?? Infinity;
+          if (area < bestArea) {
+            best = feature;
+            bestArea = area;
+          }
+        }
+      }
+    }
+    if (best) setSelectedNlc(best);
+  };
+
   // Toggle effect: fire a fetch immediately when townlands turn on (so the
   // user doesn't have to nudge the map), and clear state when they turn off.
   useEffect(() => {
@@ -1099,8 +1152,10 @@ export default function ProjectMapScreen() {
             strokeWidth={1.5}
             fillColor={`${fill}59`}
             tappable={HABITAT_TAPPABLE}
-            // No detail sheet in v1 — Phase 3 adds JS-side hit testing
-            // through MapView.onPress.
+            // Android uses native tappable (cheap on Google Maps).
+            // iOS handles taps via MapView.onPress + JS hit-test —
+            // see handleMapPress.
+            onPress={HABITAT_TAPPABLE ? () => setSelectedNlc(feature) : undefined}
             zIndex={Z_HABITAT}
           />,
         );
@@ -1114,6 +1169,58 @@ export default function ProjectMapScreen() {
     }
     return out;
   }, [layerMode, nlcFeatures, polygonMountBudget, baseMap, effectiveViewport]);
+
+  // NLC labels — anti-duplicate (max 1 per LEVEL_2_ID, the largest
+  // polygon for that code) and capped at MAX_NLC_LABELS visible at
+  // once. Only rendered at z >= MIN_NLC_LABEL_ZOOM (17) to keep the
+  // Marker bridge cost bounded; at z 16 the LEVEL_2_ID density would
+  // be too high for native Markers to handle without re-introducing
+  // the freezes from the iOS perf marathon.
+  const nlcLabelMarkers = useMemo(() => {
+    if (layerMode !== "nlc") return [];
+    if (currentZoom == null || currentZoom < MIN_NLC_LABEL_ZOOM) return [];
+    if (nlcFeatures.length === 0) return [];
+
+    // 1) Per LEVEL_2_ID, keep the feature with the largest area.
+    const largestPerCode = new Map<string, NlcFeature>();
+    for (const feature of nlcFeatures) {
+      if (!feature.level2Id) continue;
+      const existing = largestPerCode.get(feature.level2Id);
+      if (!existing || (feature.area ?? 0) > (existing.area ?? 0)) {
+        largestPerCode.set(feature.level2Id, feature);
+      }
+    }
+
+    // 2) Filter to those that intersect the viewport and have a
+    //    drawable centroid; sort by area desc; take top MAX_NLC_LABELS.
+    const candidates: Array<{
+      feature: NlcFeature;
+      anchor: { latitude: number; longitude: number };
+    }> = [];
+    for (const feature of largestPerCode.values()) {
+      const cached = nlcPiecesCacheRef.current.get(feature.id);
+      if (!cached || cached.length === 0) continue;
+      // Pick the largest piece (longest outer ring as a cheap proxy)
+      // for centroid placement so the label sits in the visually
+      // dominant part of a multi-piece feature.
+      let largest = cached[0];
+      for (const c of cached) {
+        if (c.piece.outer.length > largest.piece.outer.length) largest = c;
+      }
+      if (
+        effectiveViewport &&
+        largest.bbox &&
+        !bboxesIntersect(largest.bbox, effectiveViewport)
+      ) {
+        continue;
+      }
+      const anchor = centroidOfRing(largest.piece.outer);
+      if (!anchor) continue;
+      candidates.push({ feature, anchor });
+    }
+    candidates.sort((a, b) => (b.feature.area ?? 0) - (a.feature.area ?? 0));
+    return candidates.slice(0, MAX_NLC_LABELS);
+  }, [layerMode, currentZoom, nlcFeatures, effectiveViewport]);
 
   // Same memoisation for designated polygons. NPWS sites can be huge
   // estuarine geometries with thousands of vertices and dozens of
@@ -1343,6 +1450,7 @@ export default function ProjectMapScreen() {
               toolbarEnabled={false}
               onMapReady={handleMapReady}
               onRegionChangeComplete={handleRegionChangeComplete}
+              onPress={handleMapPress}
             >
               {/* Base + overlay tiles AND every polygon below carry baseMap
                   in their key. Without this, remounting only the UrlTile on
@@ -1397,6 +1505,22 @@ export default function ProjectMapScreen() {
               {designatedPolygonElements}
               {habitatPolygonElements}
               {nlcPolygonElements}
+              {/* NLC LEVEL_2_ID labels — only at z >= 17, max 15
+                  visible, deduped to one per code (largest polygon).
+                  Markers are heavier than Polygons on the bridge so
+                  we keep this list tight. */}
+              {nlcLabelMarkers.map(({ feature, anchor }) => (
+                <Marker
+                  key={`${baseMap}-nlc-label-${feature.id}`}
+                  coordinate={anchor}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  tracksViewChanges={false}
+                >
+                  <View style={styles.nlcLabel} pointerEvents="none">
+                    <Text style={styles.nlcLabelText}>{feature.level2Id}</Text>
+                  </View>
+                </Marker>
+              ))}
 
               {/* Buffer rings. Painted after designated sites (per parity
                   with web) so the dashed outline reads cleanly over NPWS
@@ -1493,6 +1617,10 @@ export default function ProjectMapScreen() {
         <HabitatMapModal
           habitat={selectedHabitat}
           onClose={() => setSelectedHabitat(null)}
+        />
+        <NlcDetailModal
+          feature={selectedNlc}
+          onClose={() => setSelectedNlc(null)}
         />
       </View>
     </>
@@ -1611,6 +1739,20 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   zoomHintText: { color: colors.white, fontSize: 13, fontWeight: "600" },
+
+  nlcLabel: {
+    backgroundColor: "rgba(255,255,255,0.85)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.2)",
+  },
+  nlcLabelText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#1f2937",
+  },
 
   modalBackdrop: {
     flex: 1,
