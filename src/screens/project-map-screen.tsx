@@ -80,6 +80,7 @@ import {
   resolveTileUrl,
   saveBaseMapPref,
   saveHabitatsPref,
+  saveNlcPref,
   saveTownlandsPref,
   type BaseMapId,
 } from "@/lib/map-layers";
@@ -247,6 +248,12 @@ export default function ProjectMapScreen() {
   const [baseMap, setBaseMap] = useState<BaseMapId>(DEFAULT_BASE_MAP);
   const [townlandsEnabled, setTownlandsEnabled] = useState(false);
   const [habitatsEnabled, setHabitatsEnabled] = useState(false);
+  // NLC reference layer toggle. Default ON to match expected
+  // surveyor behaviour — they zoom in past 16 and expect the
+  // reference parcels to appear automatically. Pref is loaded
+  // async so the initial state may flip once `loadMapLayerPrefs`
+  // resolves.
+  const [nlcEnabled, setNlcEnabled] = useState(true);
   const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
   const [selectedHabitat, setSelectedHabitat] = useState<HabitatPolygon | null>(null);
   // NLC reference parcels (z >= 16). Fetched per-viewport from the
@@ -287,6 +294,7 @@ export default function ProjectMapScreen() {
       setBaseMap(prefs.baseMap);
       setTownlandsEnabled(prefs.townlandsEnabled);
       setHabitatsEnabled(prefs.habitatsEnabled);
+      setNlcEnabled(prefs.nlcEnabled);
     });
     return () => { cancelled = true; };
   }, []);
@@ -430,9 +438,14 @@ export default function ProjectMapScreen() {
     if (!habitatsEnabled) return "none";
     if (currentZoom == null) return "none";
     if (currentZoom < MIN_HABITAT_RENDER_ZOOM) return "none";
+    // z >= 16 normally hands off to NLC, but the user can opt out via
+    // the Layers panel toggle (web parity — the NLC button toggles
+    // independent of the saved-habitat one). With NLC disabled we
+    // continue to render the saved-habitat layer at high zoom; user
+    // sees the simplified reference instead of the detailed Esri data.
     if (currentZoom < MIN_NLC_RENDER_ZOOM) return "habitats";
-    return "nlc";
-  }, [habitatsEnabled, currentZoom]);
+    return nlcEnabled ? "nlc" : "habitats";
+  }, [habitatsEnabled, nlcEnabled, currentZoom]);
   // Skip viewport-driven fetches during the initial fitToCoordinates
   // animation (~1.5 s). iOS fires regionChangeComplete multiple times
   // during the camera fit and each fire kicked off a fresh bbox RPC,
@@ -869,6 +882,11 @@ export default function ProjectMapScreen() {
   const handleToggleHabitats = (enabled: boolean) => {
     setHabitatsEnabled(enabled);
     saveHabitatsPref(enabled);
+  };
+
+  const handleToggleNlc = (enabled: boolean) => {
+    setNlcEnabled(enabled);
+    saveNlcPref(enabled);
   };
 
   // Per-habitat bbox span in degrees, computed once per habitats array.
@@ -1570,6 +1588,8 @@ export default function ProjectMapScreen() {
               onToggleTownlands={handleToggleTownlands}
               habitatsEnabled={habitatsEnabled}
               onToggleHabitats={handleToggleHabitats}
+              nlcEnabled={nlcEnabled}
+              onToggleNlc={handleToggleNlc}
               visible={layersOpen}
               onOpen={() => setLayersOpen(true)}
               onClose={() => setLayersOpen(false)}

@@ -129,6 +129,7 @@ export function resolveTileCachePath(cacheRoot: string, layer: BaseMapTileLayer)
 const PREF_BASE_MAP_KEY = "map.base_map";
 const PREF_TOWNLANDS_KEY = "map.townlands_enabled";
 const PREF_HABITATS_KEY = "map.habitats_enabled";
+const PREF_NLC_KEY = "map.nlc_enabled";
 
 function isBaseMapId(value: string | null | undefined): value is BaseMapId {
   return value === "streets" || value === "satellite" || value === "hybrid" || value === "topographic";
@@ -142,22 +143,36 @@ export interface MapLayerPrefs {
    *  outlier projects (one known 11 MB project), so the user opts in once
    *  they need it. Pref persists per device. */
   habitatsEnabled: boolean;
+  /** NLC 2018 reference parcels (z >= 16). Independent of habitatsEnabled
+   *  for parity with the web UI which has separate buttons. Default ON
+   *  — surveyors expect the reference layer to come up automatically
+   *  when they zoom in past z 16; turning it off is the explicit choice. */
+  nlcEnabled: boolean;
 }
 
 export async function loadMapLayerPrefs(): Promise<MapLayerPrefs> {
   try {
-    const [baseRaw, townRaw, habRaw] = await Promise.all([
+    const [baseRaw, townRaw, habRaw, nlcRaw] = await Promise.all([
       getAppState(PREF_BASE_MAP_KEY),
       getAppState(PREF_TOWNLANDS_KEY),
       getAppState(PREF_HABITATS_KEY),
+      getAppState(PREF_NLC_KEY),
     ]);
     return {
       baseMap: isBaseMapId(baseRaw) ? baseRaw : DEFAULT_BASE_MAP,
       townlandsEnabled: townRaw === "1",
       habitatsEnabled: habRaw === "1",
+      // Default ON — see field comment. Stored "0" disables; everything
+      // else (including unset / null) treats as on.
+      nlcEnabled: nlcRaw !== "0",
     };
   } catch {
-    return { baseMap: DEFAULT_BASE_MAP, townlandsEnabled: false, habitatsEnabled: false };
+    return {
+      baseMap: DEFAULT_BASE_MAP,
+      townlandsEnabled: false,
+      habitatsEnabled: false,
+      nlcEnabled: true,
+    };
   }
 }
 
@@ -176,5 +191,11 @@ export async function saveTownlandsPref(enabled: boolean): Promise<void> {
 export async function saveHabitatsPref(enabled: boolean): Promise<void> {
   try {
     await setAppState(PREF_HABITATS_KEY, enabled ? "1" : "0");
+  } catch { /* persistence is best-effort — losing a pref isn't fatal */ }
+}
+
+export async function saveNlcPref(enabled: boolean): Promise<void> {
+  try {
+    await setAppState(PREF_NLC_KEY, enabled ? "1" : "0");
   } catch { /* persistence is best-effort — losing a pref isn't fatal */ }
 }

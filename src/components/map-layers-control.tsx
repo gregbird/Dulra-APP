@@ -14,6 +14,11 @@ interface Props {
    *  toggle handler is supplied. */
   habitatsEnabled?: boolean;
   onToggleHabitats?: (enabled: boolean) => void;
+  /** NLC reference layer toggle (z >= 16). Independent of habitats —
+   *  parity with web's separate NLC button. Optional like the habitats
+   *  pair so the preview map can omit it. */
+  nlcEnabled?: boolean;
+  onToggleNlc?: (enabled: boolean) => void;
   /** Visibility is owned by the parent screen so the same button can also
    *  show an "active" indicator when overlays are on. */
   visible: boolean;
@@ -36,13 +41,16 @@ export default function MapLayersControl({
   onToggleTownlands,
   habitatsEnabled,
   onToggleHabitats,
+  nlcEnabled,
+  onToggleNlc,
   visible,
   onOpen,
   onClose,
 }: Props) {
   // Active dot lights up if any non-default overlay is on. Townlands and
-  // Habitats default to off, so either toggled-on signals an active layer
-  // configuration to the user when the panel is closed.
+  // Habitats default to off; NLC defaults on so we don't dot for it
+  // until the user explicitly turns it off and back on (showing it's
+  // user-controlled state).
   const hasActiveOverlay = townlandsEnabled || !!habitatsEnabled;
   const showSurveyLayers = !!onToggleHabitats;
   return (
@@ -150,6 +158,30 @@ export default function MapLayersControl({
                       <Text style={styles.optionHint}>FOSSITT-coloured polygons from field surveys</Text>
                     </View>
                   </TouchableOpacity>
+                  {onToggleNlc && (
+                    <TouchableOpacity
+                      style={styles.option}
+                      onPress={() => onToggleNlc(!nlcEnabled)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[styles.checkbox, nlcEnabled && styles.checkboxChecked]}>
+                        {nlcEnabled && (
+                          <Ionicons name="checkmark" size={16} color={colors.white} />
+                        )}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={[
+                            styles.optionLabel,
+                            nlcEnabled && styles.optionLabelActive,
+                          ]}
+                        >
+                          NLC reference
+                        </Text>
+                        <Text style={styles.optionHint}>National Land Cover 2018 parcels (zoom 16+)</Text>
+                      </View>
+                    </TouchableOpacity>
+                  )}
                 </View>
               </>
             )}
