@@ -266,7 +266,7 @@ export async function fetchHabitatsInBbox(
   projectId: string,
   siteId: string | null,
   bbox: HabitatBbox,
-  options?: { limit?: number; signal?: AbortSignal },
+  options?: { limit?: number; signal?: AbortSignal; tolerance?: number },
 ): Promise<HabitatPolygon[]> {
   const limit = options?.limit ?? 500;
   const isOnline = await probeOnlineState();
@@ -289,16 +289,31 @@ export async function fetchHabitatsInBbox(
     }
   }
   try {
+    // Optional `p_tolerance`: passing `undefined` lets the server use
+    // its default (0.00005, ~5 m) for backward compatibility. Mobile
+    // callers pass a tighter value at high zoom — see the
+    // `toleranceForZoom` helper in project-map-screen.tsx.
+    const rpcParams: {
+      p_project_id: string;
+      p_site_id: string | null;
+      p_min_lng: number;
+      p_min_lat: number;
+      p_max_lng: number;
+      p_max_lat: number;
+      p_limit: number;
+      p_tolerance?: number;
+    } = {
+      p_project_id: projectId,
+      p_site_id: siteId,
+      p_min_lng: bbox.minLng,
+      p_min_lat: bbox.minLat,
+      p_max_lng: bbox.maxLng,
+      p_max_lat: bbox.maxLat,
+      p_limit: limit,
+    };
+    if (options?.tolerance != null) rpcParams.p_tolerance = options.tolerance;
     const { data, error } = await supabase
-      .rpc("get_habitats_in_bbox", {
-        p_project_id: projectId,
-        p_site_id: siteId,
-        p_min_lng: bbox.minLng,
-        p_min_lat: bbox.minLat,
-        p_max_lng: bbox.maxLng,
-        p_max_lat: bbox.maxLat,
-        p_limit: limit,
-      })
+      .rpc("get_habitats_in_bbox", rpcParams)
       .abortSignal(controller.signal);
     if (error) throw error;
     const rows = Array.isArray(data) ? (data as RpcHabitatRow[]) : [];

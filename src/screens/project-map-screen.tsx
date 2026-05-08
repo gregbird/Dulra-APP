@@ -183,6 +183,24 @@ const MAX_DESIGNATED_POLYGONS = Platform.OS === "ios" ? 25 : 200;
 // them but a hard floor is clearer to the user. Tunable.
 const MIN_HABITAT_RENDER_ZOOM = 14;
 
+// Zoom-aware Douglas-Peucker tolerance for the saved-habitat
+// `get_habitats_in_bbox` RPC. Tighter tolerance at high zoom kills the
+// "triangle artifact" on parcel edges — the visible angular segments
+// surveyors reported come straight from the server's default 5 m
+// simplification, which is fine at overview zoom but coarse at parcel
+// scale. The web team added the optional `p_tolerance` param for this;
+// we send progressively tighter values as the camera zooms in.
+//
+// Returning `undefined` makes lib/habitats.ts omit the param entirely
+// so the RPC uses its default (0.00005 = ~5 m) and the server returns
+// byte-identical bytes to the pre-tolerance-param era.
+function toleranceForZoom(zoom: number | null): number | undefined {
+  if (zoom == null) return undefined;
+  if (zoom < 16) return undefined; // ~5 m default — fine at overview
+  if (zoom < 18) return 0.000005;  // ~50 cm at parcel zoom
+  return 0.000003;                  // ~30 cm at building zoom (matches NLC)
+}
+
 // NLC reference layer overlay caps. iOS keeps the same vertex
 // decimation as habitats (32) for bridge parity; render cap is
 // slightly higher because NLC parcels are typically smaller and the
@@ -507,16 +525,17 @@ export default function ProjectMapScreen() {
     if (lastFetchedBboxRef.current && bboxesEqualish(lastFetchedBboxRef.current, bbox)) {
       return;
     }
+    const tolerance = toleranceForZoom(currentZoom);
     const timer = setTimeout(() => {
       lastFetchedBboxRef.current = bbox;
-      fetchHabitatsInBbox(id, selectedSiteId ?? null, bbox)
+      fetchHabitatsInBbox(id, selectedSiteId ?? null, bbox, { tolerance })
         .then((rows) => setHabitats(rows))
         .catch(() => { /* swallow */ });
     }, VIEWPORT_FETCH_DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
     };
-  }, [id, habitatsEnabled, selectedSiteId, pendingViewportBbox, viewportFetchUnlocked, layerMode]);
+  }, [id, habitatsEnabled, selectedSiteId, pendingViewportBbox, viewportFetchUnlocked, layerMode, currentZoom]);
 
   // NLC viewport fetch — fires when the user crosses into the z >= 16
   // detail layer. Mirrors the saved-habitat fetch flow but goes against
@@ -1028,8 +1047,19 @@ export default function ProjectMapScreen() {
   // The cache is read-only-from-render — the actual writes happen
   // inside `habitatPolygonElements` below, lazily as habitats become
   // visible. Project change resets the ref via the effect.
+  // Cache value stores the boundary reference alongside its decomposed
+  // pieces — when a refetch lands at a tighter tolerance, the new
+  // habitat object carries a *different* boundary reference and we
+  // rebuild instead of returning stale coarse geometry. Identity check
+  // is enough because mergeIntoStore replaces the row wholesale.
   const piecesCacheRef = useRef<
-    Map<string, Array<{ piece: HabitatRenderPiece; bbox: HabitatBbox | null }>>
+    Map<
+      string,
+      {
+        boundary: HabitatPolygon["boundary"];
+        pieces: Array<{ piece: HabitatRenderPiece; bbox: HabitatBbox | null }>;
+      }
+    >
   >(new Map());
   useEffect(() => {
     piecesCacheRef.current = new Map();
@@ -1069,19 +1099,22 @@ export default function ProjectMapScreen() {
       }
       // Lazy lookup-or-build against the persistent ref cache. First
       // time we see a habitat we pay the decomposition cost; every
-      // subsequent render is a Map.get. Across pan/zoom this is the
-      // single biggest perf win for cadastral-import projects.
-      let piecesWithBbox = piecesCacheRef.current.get(habitat.id);
-      if (!piecesWithBbox) {
+      // subsequent render is a Map.get. Boundary-reference identity
+      // check forces a rebuild after a tolerance-driven refetch
+      // (mergeIntoStore replaces the row, the new boundary !== old).
+      let cached = piecesCacheRef.current.get(habitat.id);
+      if (!cached || cached.boundary !== habitat.boundary) {
         const pieces = habitatPolygonPieces(habitat.boundary, {
           maxVerticesPerRing: MAX_VERTICES_PER_RING,
         });
-        piecesWithBbox = pieces.map((piece) => ({
+        const piecesWithBbox = pieces.map((piece) => ({
           piece,
           bbox: bboxFromCoords(piece.outer),
         }));
-        piecesCacheRef.current.set(habitat.id, piecesWithBbox);
+        cached = { boundary: habitat.boundary, pieces: piecesWithBbox };
+        piecesCacheRef.current.set(habitat.id, cached);
       }
+      const piecesWithBbox = cached.pieces;
       if (piecesWithBbox.length === 0) continue;
       const fill = habitat.fossitt_code
         ? getFossittColor(habitat.fossitt_code)
