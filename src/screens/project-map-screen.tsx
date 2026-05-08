@@ -59,6 +59,14 @@ import {
   type HabitatBbox,
   type HabitatRenderPiece,
 } from "@/lib/habitats";
+import {
+  fetchNlcInBbox,
+  bboxToBinKey as bboxToNlcBinKey,
+  MIN_NLC_RENDER_ZOOM,
+  type NlcBbox,
+  type NlcFeature,
+} from "@/lib/nlc";
+import { nlcColorFor } from "@/lib/nlc-colors";
 import { getFossittColor } from "@/lib/fossitt-utils";
 import { UNCLASSIFIED_HABITAT_COLOR, type HabitatPolygon } from "@/types/habitat";
 import {
@@ -159,6 +167,13 @@ const MAX_DESIGNATED_POLYGONS = Platform.OS === "ios" ? 25 : 200;
 // them but a hard floor is clearer to the user. Tunable.
 const MIN_HABITAT_RENDER_ZOOM = 14;
 
+// NLC reference layer overlay caps. iOS keeps the same vertex
+// decimation as habitats (32) for bridge parity; render cap is
+// slightly higher because NLC parcels are typically smaller and the
+// user expects denser coverage at z >= 16. See plan § 4.
+const MAX_NLC_POLYGONS = Platform.OS === "ios" ? 200 : 1000;
+const MAX_NLC_VERTICES_PER_RING = Platform.OS === "ios" ? 32 : undefined;
+
 // Stacking order for overlays. Android Google Maps draws by zIndex (default
 // 0 = undefined order between overlays at same level), so without explicit
 // values a UrlTile prop change would let the tile render above polygons —
@@ -223,6 +238,13 @@ export default function ProjectMapScreen() {
   const [habitatsEnabled, setHabitatsEnabled] = useState(false);
   const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
   const [selectedHabitat, setSelectedHabitat] = useState<HabitatPolygon | null>(null);
+  // NLC reference parcels (z >= 16). Fetched per-viewport from the
+  // Esri FeatureServer; bin cache lives in lib/nlc.ts. State only
+  // holds the *current* response — pan to a new bin replaces it
+  // (cache hit makes that instant). Render gated on layerMode below.
+  const [nlcFeatures, setNlcFeatures] = useState<NlcFeature[]>([]);
+  const lastNlcBinKeyRef = useRef<string | null>(null);
+  const nlcAbortRef = useRef<AbortController | null>(null);
   // Live zoom span in degrees (the camera's longitudeDelta), updated only
   // on significant zoom changes — see handleRegionChangeComplete. Drives
   // the skip-when-tiny cull below. Null until the first regionChange
@@ -280,39 +302,6 @@ export default function ProjectMapScreen() {
     return () => clearTimeout(handle);
   }, [polygonMountBudget, polygonMountTarget]);
 
-  // Diagnostic — fires at key lifecycle moments so we can finally pin
-  // down where the freeze comes from with measurements instead of
-  // guesses. Removed once perf is stable.
-  const mountStartRef = useRef<number>(Date.now());
-  useEffect(() => {
-    if (__DEV__) {
-      // eslint-disable-next-line no-console
-      console.log(`[map] mount t=0`);
-    }
-  }, []);
-  useEffect(() => {
-    if (__DEV__ && data) {
-      // eslint-disable-next-line no-console
-      console.log(`[map] data ready t=${Date.now() - mountStartRef.current}ms`);
-    }
-  }, [data]);
-  useEffect(() => {
-    if (__DEV__ && designated.length > 0) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[map] designated arrived (${designated.length}) t=${Date.now() - mountStartRef.current}ms`,
-      );
-    }
-  }, [designated]);
-  useEffect(() => {
-    if (__DEV__ && polygonMountBudget > 0 && polygonMountBudget % 5 === 0) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[map] mount budget=${polygonMountBudget}/${polygonMountTarget} t=${Date.now() - mountStartRef.current}ms`,
-      );
-    }
-  }, [polygonMountBudget, polygonMountTarget]);
-
   // Reset the project's accumulating habitat store on every fresh map
   // mount. Across-session accumulation was producing the "open project,
   // freezes for 2 minutes" symptom — earlier sessions panned across the
@@ -335,16 +324,6 @@ export default function ProjectMapScreen() {
     // unrelated state changes within the session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  // Commit-time diagnostic — fires after React commits a render that
-  // changed `habitats`. If the bbox-fetch log appears but this one
-  // doesn't, the render itself is hanging (commit hasn't completed).
-  useEffect(() => {
-    if (__DEV__ && habitats.length > 0) {
-      // eslint-disable-next-line no-console
-      console.log(`[habitats] commit → habitats.length=${habitats.length}`);
-    }
-  }, [habitats]);
 
   // Habitat polygons follow a viewport-loading model — see the spec at
   // `docs/habitats-bbox-rpc-migration.sql.md`. There is no "fetch the
@@ -386,6 +365,62 @@ export default function ProjectMapScreen() {
   // `viewportTooLarge` flag.
   const [pendingViewportBbox, setPendingViewportBbox] = useState<HabitatBbox | null>(null);
   const lastFetchedBboxRef = useRef<HabitatBbox | null>(null);
+
+  // Camera focus + zoom + layer-mode chain. Declared up here (instead
+  // of next to the other geometry memos) because the viewport-fetch
+  // effects below need to gate on `layerMode`. With these defined
+  // late we hit a TDZ from the effect's reference. They depend only
+  // on already-declared state (`data`, `selectedSiteId`,
+  // `pendingViewportBbox`, `zoomLngDelta`, `habitatsEnabled`).
+  const focusCoords = useMemo(() => {
+    if (!data) return [];
+    if (selectedSiteId) {
+      const site = data.sites.find((s) => s.id === selectedSiteId);
+      const sitePoly = polygonToCoordinates(site?.boundary ?? null);
+      if (sitePoly.length > 0) return sitePoly;
+    }
+    return flattenBoundaryCoordinates(data);
+  }, [data, selectedSiteId]);
+
+  const initialZoomLngDelta = useMemo(() => {
+    if (focusCoords.length === 0) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const c of focusCoords) {
+      if (c.longitude < min) min = c.longitude;
+      if (c.longitude > max) max = c.longitude;
+    }
+    if (!isFinite(min) || max === min) return null;
+    return (max - min) * 1.4;
+  }, [focusCoords]);
+
+  const effectiveZoomDelta = zoomLngDelta ?? initialZoomLngDelta;
+
+  const initialViewportBbox = useMemo(() => {
+    return bboxFromCoords(focusCoords);
+  }, [focusCoords]);
+
+  const effectiveViewport = pendingViewportBbox ?? initialViewportBbox;
+
+  const currentZoom = useMemo(() => {
+    if (effectiveViewport) {
+      const lngDelta = effectiveViewport.maxLng - effectiveViewport.minLng;
+      if (lngDelta > 0) return approximateZoom(lngDelta, SCREEN_WIDTH);
+    }
+    if (effectiveZoomDelta != null) {
+      return approximateZoom(effectiveZoomDelta, SCREEN_WIDTH);
+    }
+    return null;
+  }, [effectiveViewport, effectiveZoomDelta]);
+
+  type LayerMode = "none" | "habitats" | "nlc";
+  const layerMode: LayerMode = useMemo(() => {
+    if (!habitatsEnabled) return "none";
+    if (currentZoom == null) return "none";
+    if (currentZoom < MIN_HABITAT_RENDER_ZOOM) return "none";
+    if (currentZoom < MIN_NLC_RENDER_ZOOM) return "habitats";
+    return "nlc";
+  }, [habitatsEnabled, currentZoom]);
   // Skip viewport-driven fetches during the initial fitToCoordinates
   // animation (~1.5 s). iOS fires regionChangeComplete multiple times
   // during the camera fit and each fire kicked off a fresh bbox RPC,
@@ -399,22 +434,19 @@ export default function ProjectMapScreen() {
   }, []);
   useEffect(() => {
     if (!id || !habitatsEnabled || !pendingViewportBbox || !viewportFetchUnlocked) return;
-    const bbox = pendingViewportBbox;
-    // Guard 0 (zoom floor): if the camera is below the render-zoom
-    // threshold there's nothing to draw anyway — and the fetch + JSON
-    // parse + memo cascade for hundreds of habitats would freeze the
-    // JS thread for nothing. Compute zoom directly from the bbox
-    // width — using `zoomLngDelta` state would miss this guard during
-    // the initial fit animation (state isn't set until a significant
-    // zoom change fires). bbox's own width is always accurate.
-    const bboxLngDelta = bbox.maxLng - bbox.minLng;
-    if (bboxLngDelta > 0) {
-      const zoom = approximateZoom(bboxLngDelta, SCREEN_WIDTH);
-      if (zoom < MIN_HABITAT_RENDER_ZOOM) {
-        setViewportTooLarge(true);
-        return;
-      }
+    // Mode guard: this effect only runs when the saved-habitat layer is
+    // the active visible layer. At zoom >= 16 the NLC layer takes over
+    // (separate effect below); zoom < 14 the screen renders nothing and
+    // we surface the "Zoom in" banner. Without this guard we'd keep
+    // hammering the Supabase RPC while the user pans around the NLC
+    // detail layer.
+    if (layerMode !== "habitats") {
+      // Below MIN_HABITAT_RENDER_ZOOM: surface the zoom hint. Above
+      // MIN_NLC_RENDER_ZOOM we don't want the banner — NLC is loading.
+      if (layerMode === "none") setViewportTooLarge(true);
+      return;
     }
+    const bbox = pendingViewportBbox;
     // Guard 1: viewport too large → skip fetch, surface banner.
     if (bboxAreaKm2(bbox) > VIEWPORT_AREA_LIMIT_KM2) {
       setViewportTooLarge(true);
@@ -434,7 +466,82 @@ export default function ProjectMapScreen() {
     return () => {
       clearTimeout(timer);
     };
-  }, [id, habitatsEnabled, selectedSiteId, pendingViewportBbox, viewportFetchUnlocked]);
+  }, [id, habitatsEnabled, selectedSiteId, pendingViewportBbox, viewportFetchUnlocked, layerMode]);
+
+  // NLC viewport fetch — fires when the user crosses into the z >= 16
+  // detail layer. Mirrors the saved-habitat fetch flow but goes against
+  // the Esri FeatureServer (paged GeoJSON, bin-cached inside lib/nlc.ts)
+  // and stores results in a separate state slot. Bin cache means a small
+  // pan inside the same 0.005° bin replays without a network round-trip.
+  useEffect(() => {
+    if (!habitatsEnabled || layerMode !== "nlc" || !pendingViewportBbox || !viewportFetchUnlocked) {
+      return;
+    }
+    setViewportTooLarge(false);
+    const bbox: NlcBbox = {
+      minLng: pendingViewportBbox.minLng,
+      minLat: pendingViewportBbox.minLat,
+      maxLng: pendingViewportBbox.maxLng,
+      maxLat: pendingViewportBbox.maxLat,
+    };
+    // Bin-key dedupe: a tiny pan within the same 0.005° bin is a no-op.
+    // The library's bin cache will also short-circuit if the request
+    // does fire — this guard just avoids the debounce timer churn.
+    const key = bboxToNlcBinKey(bbox);
+    if (lastNlcBinKeyRef.current === key) return;
+
+    const timer = setTimeout(() => {
+      // Cancel any previous in-flight NLC fetch so a fast pan doesn't
+      // pile multiple requests on the JS thread.
+      nlcAbortRef.current?.abort();
+      const controller = new AbortController();
+      nlcAbortRef.current = controller;
+      lastNlcBinKeyRef.current = key;
+      fetchNlcInBbox(bbox, { signal: controller.signal })
+        .then((result) => {
+          // latestKey guard — if the user has panned to a different bin
+          // since this fetch started, the response is stale; drop it.
+          if (lastNlcBinKeyRef.current !== key) return;
+          setNlcFeatures(result.features);
+          if (__DEV__) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[nlc] fetch → ${result.features.length} features${result.truncated ? " (truncated)" : ""}`,
+            );
+          }
+        })
+        .catch((err: unknown) => {
+          // Aborts are expected; everything else is a non-critical
+          // layer failure — silent.
+          const name = (err as { name?: string } | null)?.name;
+          if (name !== "AbortError" && __DEV__) {
+            // eslint-disable-next-line no-console
+            console.warn(`[nlc] fetch error:`, err);
+          }
+        });
+    }, VIEWPORT_FETCH_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [habitatsEnabled, layerMode, pendingViewportBbox, viewportFetchUnlocked]);
+
+  // When we leave NLC mode (zoom out, toggle off, project change), drop
+  // the NLC features from state and abort any in-flight fetch. Without
+  // this, the leftover features would still feed the render memo at the
+  // moment of mode flip and the user would see a single-frame flash of
+  // NLC polygons over the saved-habitat layer.
+  useEffect(() => {
+    if (layerMode !== "nlc") {
+      nlcAbortRef.current?.abort();
+      nlcAbortRef.current = null;
+      lastNlcBinKeyRef.current = null;
+      if (nlcFeatures.length > 0) setNlcFeatures([]);
+    }
+    // We deliberately do not include nlcFeatures in deps — that would
+    // re-fire the cleanup on every fetch resolution. We just want the
+    // mode-transition trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layerMode]);
 
   // When the toggle flips off, clear any pending state but DO NOT clear
   // the module store — the user may flip it back on and we want their
@@ -752,48 +859,6 @@ export default function ProjectMapScreen() {
   // render briefly used project-wide coords even when the user had a
   // small site selected, leaving the viewport AABB filter too loose
   // and rendering polygons that aren't on screen.
-  const focusCoords = useMemo(() => {
-    if (!data) return [];
-    if (selectedSiteId) {
-      const site = data.sites.find((s) => s.id === selectedSiteId);
-      const sitePoly = polygonToCoordinates(site?.boundary ?? null);
-      if (sitePoly.length > 0) return sitePoly;
-    }
-    return flattenBoundaryCoordinates(data);
-  }, [data, selectedSiteId]);
-
-  // Initial zoom estimate matching the focus coords above. The 1.4×
-  // fudge accounts for FIT_PADDING expanding the camera beyond the raw
-  // bbox.
-  const initialZoomLngDelta = useMemo(() => {
-    if (focusCoords.length === 0) return null;
-    let min = Infinity;
-    let max = -Infinity;
-    for (const c of focusCoords) {
-      if (c.longitude < min) min = c.longitude;
-      if (c.longitude > max) max = c.longitude;
-    }
-    if (!isFinite(min) || max === min) return null;
-    return (max - min) * 1.4;
-  }, [focusCoords]);
-
-  // Effective threshold — the live zoom once we have it, otherwise the
-  // project-bbox derived seed. Null only when both are missing (no
-  // boundary loaded), in which case the size filter degrades to a no-op.
-  const effectiveZoomDelta = zoomLngDelta ?? initialZoomLngDelta;
-
-  // Initial viewport bbox matching the focus coords (so it tracks the
-  // selected site). Used as the cull anchor *before* the first
-  // regionChangeComplete fires, when viewportBbox state is still null.
-  const initialViewportBbox = useMemo(() => {
-    return bboxFromCoords(focusCoords);
-  }, [focusCoords]);
-
-  // Live viewport for the AABB filter — the camera region after the
-  // most recent regionChangeComplete, falling back to the initial
-  // project-boundary bbox until the user moves the map.
-  const effectiveViewport = pendingViewportBbox ?? initialViewportBbox;
-
   // Site-aware habitat list. When the surveyor narrows to one site we hide
   // the rest of the project's habitats — same rationale as buffer rings:
   // unrelated polygons add visual noise once the focus has moved. Habitats
@@ -806,16 +871,10 @@ export default function ProjectMapScreen() {
   // sub-100m polygons (invisible anyway); zooming in naturally lifts the
   // threshold and brings them back.
   const visibleHabitats = useMemo(() => {
-    if (!habitatsEnabled) return [];
-    // Zoom hard floor — surveyors only care about polygon detail at
-    // parcel scale; at "I can see the whole county" zoom even a few
-    // surviving polygons read as visual noise (Android user reported
-    // this — cap=500 there leaves enough through that they appeared as
-    // dots at the edges). Below the threshold, paint nothing.
-    if (effectiveZoomDelta != null) {
-      const zoom = approximateZoom(effectiveZoomDelta, SCREEN_WIDTH);
-      if (zoom < MIN_HABITAT_RENDER_ZOOM) return [];
-    }
+    // layerMode handles both the toggle-off and zoom-floor cases plus
+    // the z >= 16 handoff to the NLC layer (saved habitats hide so
+    // coarse + detail aren't visible together).
+    if (layerMode !== "habitats") return [];
     let rows = sortedHabitats;
     if (selectedSiteId) {
       rows = rows.filter((h) => h.site_id === selectedSiteId || h.site_id === null);
@@ -854,7 +913,7 @@ export default function ProjectMapScreen() {
     return rows;
   }, [
     sortedHabitats,
-    habitatsEnabled,
+    layerMode,
     selectedSiteId,
     effectiveZoomDelta,
     habitatBboxSizes,
@@ -908,12 +967,8 @@ export default function ProjectMapScreen() {
     );
     if (budgetForHabitats === 0) return [];
     const out: ReactElement[] = [];
-    let totalVerticesAfterDecimation = 0;
-    let droppedOutOfView = 0;
-    let droppedByCap = 0;
     for (const habitat of visibleHabitats) {
       if (out.length >= Math.min(budgetForHabitats, MAX_HABITAT_POLYGONS)) {
-        droppedByCap++;
         continue;
       }
       // Lazy lookup-or-build against the persistent ref cache. First
@@ -937,20 +992,10 @@ export default function ProjectMapScreen() {
         : UNCLASSIFIED_HABITAT_COLOR;
       const stroke = darkenHex(fill, 0.65);
       for (let idx = 0; idx < piecesWithBbox.length; idx++) {
-        if (out.length >= MAX_HABITAT_POLYGONS) {
-          droppedByCap++;
-          break;
-        }
+        if (out.length >= MAX_HABITAT_POLYGONS) break;
         const { piece, bbox: pieceBbox } = piecesWithBbox[idx];
         if (effectiveViewport && pieceBbox && !bboxesIntersect(pieceBbox, effectiveViewport)) {
-          droppedOutOfView++;
           continue;
-        }
-        if (__DEV__) {
-          totalVerticesAfterDecimation += piece.outer.length;
-          if (HABITAT_RENDER_HOLES) {
-            for (const hole of piece.holes) totalVerticesAfterDecimation += hole.length;
-          }
         }
         out.push(
           <Polygon
@@ -969,14 +1014,102 @@ export default function ProjectMapScreen() {
         );
       }
     }
+    return out;
+  }, [visibleHabitats, polygonMountBudget, baseMap, effectiveViewport]);
+
+  // NLC piece cache — same persistent ref-based pattern as the saved
+  // habitat cache above. NLC features are smaller per-row (a single
+  // parcel, not a multi-island MultiPolygon) so build cost is light,
+  // but the decimation + bbox compute would still re-fire on every
+  // render's memo recompute without the cache. Reset on project change.
+  const nlcPiecesCacheRef = useRef<
+    Map<string, Array<{ piece: HabitatRenderPiece; bbox: HabitatBbox | null }>>
+  >(new Map());
+  useEffect(() => {
+    nlcPiecesCacheRef.current = new Map();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // NLC polygon JSX. Same shape as habitatPolygonElements: budget-gated
+  // mount, viewport AABB filter, output cap, vertex decimation. Differs
+  // in the source (Esri NLC features vs Supabase saved habitats), the
+  // cap value, and that no detail-sheet onPress is wired in v1 (Phase 3
+  // adds JS-side hit-testing through MapView.onPress).
+  const nlcPolygonElements = useMemo(() => {
+    if (layerMode !== "nlc") return [];
+    // NLC takes the same render budget slot the saved-habitat layer
+    // would have used. They never both render thanks to layerMode, so
+    // the polygonMountBudget pacing applies to whichever layer is
+    // active.
+    const budgetForNlc = Math.max(0, polygonMountBudget - MAX_DESIGNATED_POLYGONS);
+    if (budgetForNlc === 0) return [];
+
+    const out: ReactElement[] = [];
+    let totalVerticesAfterDecimation = 0;
+    let droppedOutOfView = 0;
+    let droppedByCap = 0;
+
+    for (const feature of nlcFeatures) {
+      if (out.length >= Math.min(budgetForNlc, MAX_NLC_POLYGONS)) {
+        droppedByCap++;
+        continue;
+      }
+      let piecesWithBbox = nlcPiecesCacheRef.current.get(feature.id);
+      if (!piecesWithBbox) {
+        const pieces = habitatPolygonPieces(feature.geometry, {
+          maxVerticesPerRing: MAX_NLC_VERTICES_PER_RING,
+        });
+        piecesWithBbox = pieces.map((piece) => ({
+          piece,
+          bbox: bboxFromCoords(piece.outer),
+        }));
+        nlcPiecesCacheRef.current.set(feature.id, piecesWithBbox);
+      }
+      if (piecesWithBbox.length === 0) continue;
+      const fill = nlcColorFor(feature.level2Id);
+      const stroke = darkenHex(fill, 0.65);
+      for (let idx = 0; idx < piecesWithBbox.length; idx++) {
+        if (out.length >= MAX_NLC_POLYGONS) {
+          droppedByCap++;
+          break;
+        }
+        const { piece, bbox: pieceBbox } = piecesWithBbox[idx];
+        if (effectiveViewport && pieceBbox && !bboxesIntersect(pieceBbox, effectiveViewport)) {
+          droppedOutOfView++;
+          continue;
+        }
+        if (__DEV__) {
+          totalVerticesAfterDecimation += piece.outer.length;
+          if (HABITAT_RENDER_HOLES) {
+            for (const hole of piece.holes) totalVerticesAfterDecimation += hole.length;
+          }
+        }
+        out.push(
+          <Polygon
+            key={`${baseMap}-nlc-${feature.id}-${idx}`}
+            coordinates={piece.outer}
+            holes={
+              HABITAT_RENDER_HOLES && piece.holes.length > 0 ? piece.holes : undefined
+            }
+            strokeColor={stroke}
+            strokeWidth={1.5}
+            fillColor={`${fill}59`}
+            tappable={HABITAT_TAPPABLE}
+            // No detail sheet in v1 — Phase 3 adds JS-side hit testing
+            // through MapView.onPress.
+            zIndex={Z_HABITAT}
+          />,
+        );
+      }
+    }
     if (__DEV__) {
       // eslint-disable-next-line no-console
       console.log(
-        `[habitats] render → ${out.length} polygons, ${totalVerticesAfterDecimation} vertices (cap=${MAX_HABITAT_POLYGONS}, vMax=${MAX_VERTICES_PER_RING ?? "∞"}, dropped: ${droppedOutOfView} off-view, ${droppedByCap} over-cap)`,
+        `[nlc] render → ${out.length} polygons, ${totalVerticesAfterDecimation} vertices (cap=${MAX_NLC_POLYGONS}, vMax=${MAX_NLC_VERTICES_PER_RING ?? "∞"}, dropped: ${droppedOutOfView} off-view, ${droppedByCap} over-cap)`,
       );
     }
     return out;
-  }, [visibleHabitats, polygonMountBudget, baseMap, effectiveViewport]);
+  }, [layerMode, nlcFeatures, polygonMountBudget, baseMap, effectiveViewport]);
 
   // Same memoisation for designated polygons. NPWS sites can be huge
   // estuarine geometries with thousands of vertices and dozens of
@@ -999,14 +1132,6 @@ export default function ProjectMapScreen() {
         maxVerticesPerRing: DESIGNATED_MAX_VERTICES_PER_RING,
       });
       cache.set(designatedCacheKey(site), pieces);
-    }
-    if (__DEV__) {
-      let totalPieces = 0;
-      for (const v of cache.values()) totalPieces += v.length;
-      // eslint-disable-next-line no-console
-      console.log(
-        `[map] designatedPiecesCache built: ${cache.size} sites → ${totalPieces} pieces`,
-      );
     }
     return cache;
   }, [designated]);
@@ -1112,11 +1237,6 @@ export default function ProjectMapScreen() {
 
   const bufferRings = useMemo(() => {
     if (!data || !bufferRingsReady) return [];
-    // Diagnostic timing kept (cheap) — useful if turf.buffer ever shows
-    // up again as a hot spot. The bufferRingsReady gate already defers
-    // the first compute until polygon-mount budget has progressed, so
-    // this no longer competes with initial paint.
-    const tStart = Date.now();
     const rings: Array<{
       key: string;
       coords: Array<{ latitude: number; longitude: number }>;
@@ -1157,10 +1277,6 @@ export default function ProjectMapScreen() {
       // distances. We don't carry projects.buffer_distances through the
       // RPC yet, so the default is the only signal here.
       addRingsFor(data.projectBoundary.geometry, null, "buf-project");
-    }
-    if (__DEV__) {
-      // eslint-disable-next-line no-console
-      console.log(`[map] bufferRings: ${rings.length} rings in ${Date.now() - tStart}ms`);
     }
     return rings;
   }, [data, selectedSiteId, bufferRingsReady]);
@@ -1270,9 +1386,13 @@ export default function ProjectMapScreen() {
               {/* Designated sites + habitat polygons are rendered from
                   pre-memoised JSX arrays so polygon-tap state changes
                   don't trigger O(N) reconciliation against the layer.
-                  See the useMemo definitions above for why. */}
+                  See the useMemo definitions above for why.
+                  habitatPolygonElements and nlcPolygonElements are
+                  mutually exclusive via layerMode — the active one
+                  returns its array, the other returns []. */}
               {designatedPolygonElements}
               {habitatPolygonElements}
+              {nlcPolygonElements}
 
               {/* Buffer rings. Painted after designated sites (per parity
                   with web) so the dashed outline reads cleanly over NPWS
