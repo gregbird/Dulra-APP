@@ -12,31 +12,12 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
-import { cacheTemplate, getCachedTemplates } from "@/lib/database";
+import {
+  getCachedTemplates,
+  replaceCachedTemplates,
+} from "@/lib/database";
 import { useNetworkStore } from "@/lib/network";
-import { FALLBACK_SURVEY_TYPES, type SurveyTemplate } from "@/types/survey-template";
-
-const RELEVE_ENTRY: SurveyTemplate = {
-  id: "releve_survey",
-  name: "Relevé Survey",
-  survey_type: "releve_survey",
-  is_active: true,
-  default_fields: { sections: [] },
-};
-
-/**
- * Merge DB templates with the fallback list so every known survey type
- * appears in the picker, even if the org's DB rows are missing.
- * DB rows win — fallback only fills gaps.
- */
-function mergeWithFallback(dbList: SurveyTemplate[]): SurveyTemplate[] {
-  const seen = new Set(dbList.map((t) => t.survey_type));
-  const merged = [...dbList];
-  for (const f of FALLBACK_SURVEY_TYPES) {
-    if (!seen.has(f.survey_type)) merged.push(f);
-  }
-  return merged.sort((a, b) => a.name.localeCompare(b.name));
-}
+import type { SurveyTemplate } from "@/types/survey-template";
 
 interface SurveyTypePickerProps {
   visible: boolean;
@@ -44,6 +25,15 @@ interface SurveyTypePickerProps {
   onSelect: (template: SurveyTemplate) => void;
 }
 
+/**
+ * Survey-type picker. Source of truth is `survey_templates.is_active`
+ * toggled per-org from web Settings → Survey Templates: only rows with
+ * `is_active = true` for the user's org appear here. Mobile is
+ * read-only — there is no "Coming soon" placeholder, no hardcoded
+ * fallback list, and no Relevé hardcoded inject. If a type isn't in
+ * the active set, the org admin has disabled it and the surveyor
+ * shouldn't see it at all.
+ */
 export default function SurveyTypePicker({
   visible,
   onClose,
@@ -66,31 +56,31 @@ export default function SurveyTypePicker({
           .eq("is_active", true)
           .order("name");
 
-        const dbList = data ?? [];
-        const withReleve = dbList.some((t) => t.survey_type === "releve_survey")
-          ? dbList
-          : [...dbList, RELEVE_ENTRY];
-        setTemplates(mergeWithFallback(withReleve));
-        for (const t of dbList) {
-          await cacheTemplate({
+        const list = (data ?? []) as SurveyTemplate[];
+        setTemplates(list);
+        // Replace the local cache wholesale. Per-row INSERT OR REPLACE
+        // would leave orphans for any type the admin just disabled —
+        // those rows would persist in cached_templates and re-surface
+        // the next time the picker opens offline. The replace helper
+        // wraps DELETE + INSERT in one transaction so the offline
+        // path always mirrors the latest active set.
+        await replaceCachedTemplates(
+          list.map((t) => ({
             surveyType: t.survey_type,
             name: t.name,
-            defaultFields: t.default_fields ?? {},
-          });
-        }
+            defaultFields: t.default_fields ?? { sections: [] },
+          })),
+        );
       } else {
         const cached = await getCachedTemplates();
-        const list = cached.map((c) => ({
+        const list: SurveyTemplate[] = cached.map((c) => ({
           id: c.survey_type,
           name: c.name,
           survey_type: c.survey_type,
           is_active: true,
           default_fields: JSON.parse(c.default_fields),
         }));
-        const withReleve = list.some((t) => t.survey_type === "releve_survey")
-          ? list
-          : [...list, RELEVE_ENTRY];
-        setTemplates(mergeWithFallback(withReleve));
+        setTemplates(list);
       }
 
       setLoading(false);
@@ -98,12 +88,6 @@ export default function SurveyTypePicker({
 
     fetchTemplates();
   }, [visible]);
-
-  const hasForm = (t: SurveyTemplate) => {
-    if (t.survey_type === "releve_survey") return true;
-    const sections = t.default_fields?.sections;
-    return Array.isArray(sections) && sections.length > 0;
-  };
 
   return (
     <Modal
@@ -128,44 +112,33 @@ export default function SurveyTypePicker({
           <View style={styles.center}>
             <ActivityIndicator size="large" color={colors.primary.DEFAULT} />
           </View>
+        ) : templates.length === 0 ? (
+          <View style={styles.center}>
+            <Ionicons name="information-circle-outline" size={32} color={colors.text.muted} />
+            <Text style={styles.emptyTitle}>No survey types available</Text>
+            <Text style={styles.emptyBody}>Ask your admin to enable one in web Settings.</Text>
+          </View>
         ) : (
           <FlatList
             data={templates}
             keyExtractor={(item) => item.id}
             contentContainerStyle={styles.list}
-            renderItem={({ item }) => {
-              const available = hasForm(item);
-              return (
-                <TouchableOpacity
-                  style={[styles.card, !available && styles.cardDisabled]}
-                  activeOpacity={available ? 0.7 : 1}
-                  onPress={() => {
-                    if (available) onSelect(item);
-                  }}
-                >
-                  <View style={styles.cardContent}>
-                    <Text
-                      style={[
-                        styles.cardTitle,
-                        !available && styles.cardTitleDisabled,
-                      ]}
-                    >
-                      {item.name}
-                    </Text>
-                    {!available && (
-                      <Text style={styles.cardSub}>Coming soon</Text>
-                    )}
-                  </View>
-                  {available && (
-                    <Ionicons
-                      name="chevron-forward"
-                      size={22}
-                      color={colors.text.muted}
-                    />
-                  )}
-                </TouchableOpacity>
-              );
-            }}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.card}
+                activeOpacity={0.7}
+                onPress={() => onSelect(item)}
+              >
+                <View style={styles.cardContent}>
+                  <Text style={styles.cardTitle}>{item.name}</Text>
+                </View>
+                <Ionicons
+                  name="chevron-forward"
+                  size={22}
+                  color={colors.text.muted}
+                />
+              </TouchableOpacity>
+            )}
           />
         )}
       </SafeAreaView>
@@ -196,6 +169,19 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
+    paddingHorizontal: 32,
+    gap: 8,
+  },
+  emptyTitle: {
+    fontSize: 17,
+    fontWeight: "600",
+    color: colors.text.body,
+    marginTop: 8,
+  },
+  emptyBody: {
+    fontSize: 14,
+    color: colors.text.muted,
+    textAlign: "center",
   },
   list: {
     padding: 12,
@@ -212,9 +198,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E5E7EB",
   },
-  cardDisabled: {
-    opacity: 0.5,
-  },
   cardContent: {
     flex: 1,
   },
@@ -222,13 +205,5 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: "600",
     color: colors.text.heading,
-  },
-  cardTitleDisabled: {
-    color: colors.text.muted,
-  },
-  cardSub: {
-    fontSize: 14,
-    color: colors.text.muted,
-    marginTop: 2,
   },
 });

@@ -130,6 +130,7 @@ const PREF_BASE_MAP_KEY = "map.base_map";
 const PREF_TOWNLANDS_KEY = "map.townlands_enabled";
 const PREF_HABITATS_KEY = "map.habitats_enabled";
 const PREF_NLC_KEY = "map.nlc_enabled";
+const PREF_AQUATIC_KEY = "map.aquatic_enabled";
 
 function isBaseMapId(value: string | null | undefined): value is BaseMapId {
   return value === "streets" || value === "satellite" || value === "hybrid" || value === "topographic";
@@ -148,15 +149,21 @@ export interface MapLayerPrefs {
    *  — surveyors expect the reference layer to come up automatically
    *  when they zoom in past z 16; turning it off is the explicit choice. */
   nlcEnabled: boolean;
+  /** Aquatic features overlay (EPA water bodies + catchments). Mutually
+   *  exclusive with habitats and NLC — turning aquatic on auto-disables
+   *  the other two so the map stays readable. Default off; data comes
+   *  from desk_research_findings rows the web user has marked saved. */
+  aquaticEnabled: boolean;
 }
 
 export async function loadMapLayerPrefs(): Promise<MapLayerPrefs> {
   try {
-    const [baseRaw, townRaw, habRaw, nlcRaw] = await Promise.all([
+    const [baseRaw, townRaw, habRaw, nlcRaw, aquaticRaw] = await Promise.all([
       getAppState(PREF_BASE_MAP_KEY),
       getAppState(PREF_TOWNLANDS_KEY),
       getAppState(PREF_HABITATS_KEY),
       getAppState(PREF_NLC_KEY),
+      getAppState(PREF_AQUATIC_KEY),
     ]);
     return {
       baseMap: isBaseMapId(baseRaw) ? baseRaw : DEFAULT_BASE_MAP,
@@ -165,6 +172,7 @@ export async function loadMapLayerPrefs(): Promise<MapLayerPrefs> {
       // Default ON — see field comment. Stored "0" disables; everything
       // else (including unset / null) treats as on.
       nlcEnabled: nlcRaw !== "0",
+      aquaticEnabled: aquaticRaw === "1",
     };
   } catch {
     return {
@@ -172,6 +180,7 @@ export async function loadMapLayerPrefs(): Promise<MapLayerPrefs> {
       townlandsEnabled: false,
       habitatsEnabled: false,
       nlcEnabled: true,
+      aquaticEnabled: false,
     };
   }
 }
@@ -197,5 +206,11 @@ export async function saveHabitatsPref(enabled: boolean): Promise<void> {
 export async function saveNlcPref(enabled: boolean): Promise<void> {
   try {
     await setAppState(PREF_NLC_KEY, enabled ? "1" : "0");
+  } catch { /* persistence is best-effort — losing a pref isn't fatal */ }
+}
+
+export async function saveAquaticPref(enabled: boolean): Promise<void> {
+  try {
+    await setAppState(PREF_AQUATIC_KEY, enabled ? "1" : "0");
   } catch { /* persistence is best-effort — losing a pref isn't fatal */ }
 }

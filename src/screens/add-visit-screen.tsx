@@ -14,7 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { colors } from "@/constants/colors";
 import SurveyorPicker from "@/components/surveyor-picker";
 import { supabase } from "@/lib/supabase";
-import { surveyTypeLabels } from "@/types/survey";
+import { useSurveyTypeLabel } from "@/hooks/use-survey-type-label";
 import { saveAddVisit } from "@/lib/survey-save";
 import {
   loadAllVisitSurveysForProject,
@@ -61,6 +61,7 @@ export default function AddVisitScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
+  const resolveSurveyTypeLabel = useSurveyTypeLabel();
 
   useEffect(() => {
     let cancelled = false;
@@ -182,7 +183,7 @@ export default function AddVisitScreen() {
   }
 
   const today = new Date().toISOString().split("T")[0];
-  const surveyTypeLabel = surveyTypeLabels[parent.surveyType] ?? parent.surveyType;
+  const surveyTypeLabel = resolveSurveyTypeLabel(parent.surveyType);
 
   return (
     <>

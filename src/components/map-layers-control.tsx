@@ -19,6 +19,11 @@ interface Props {
    *  pair so the preview map can omit it. */
   nlcEnabled?: boolean;
   onToggleNlc?: (enabled: boolean) => void;
+  /** Aquatic features overlay toggle (EPA water bodies + catchments).
+   *  Mutually exclusive with habitats and NLC — the parent screen's
+   *  handler enforces the mutex. Optional so preview maps can omit. */
+  aquaticEnabled?: boolean;
+  onToggleAquatic?: (enabled: boolean) => void;
   /** Visibility is owned by the parent screen so the same button can also
    *  show an "active" indicator when overlays are on. */
   visible: boolean;
@@ -43,15 +48,17 @@ export default function MapLayersControl({
   onToggleHabitats,
   nlcEnabled,
   onToggleNlc,
+  aquaticEnabled,
+  onToggleAquatic,
   visible,
   onOpen,
   onClose,
 }: Props) {
-  // Active dot lights up if any non-default overlay is on. Townlands and
-  // Habitats default to off; NLC defaults on so we don't dot for it
-  // until the user explicitly turns it off and back on (showing it's
-  // user-controlled state).
-  const hasActiveOverlay = townlandsEnabled || !!habitatsEnabled;
+  // Active dot lights up if any non-default overlay is on. Townlands,
+  // Habitats and Aquatic default off; NLC defaults on so we don't dot
+  // for it until the user explicitly turns it off and back on (showing
+  // it's user-controlled state).
+  const hasActiveOverlay = townlandsEnabled || !!habitatsEnabled || !!aquaticEnabled;
   const showSurveyLayers = !!onToggleHabitats;
   return (
     <>
@@ -179,6 +186,30 @@ export default function MapLayersControl({
                           NLC reference
                         </Text>
                         <Text style={styles.optionHint}>National Land Cover 2018 parcels (zoom 16+)</Text>
+                      </View>
+                    </TouchableOpacity>
+                  )}
+                  {onToggleAquatic && (
+                    <TouchableOpacity
+                      style={styles.option}
+                      onPress={() => onToggleAquatic(!aquaticEnabled)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[styles.checkbox, aquaticEnabled && styles.checkboxChecked]}>
+                        {aquaticEnabled && (
+                          <Ionicons name="checkmark" size={16} color={colors.white} />
+                        )}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text
+                          style={[
+                            styles.optionLabel,
+                            aquaticEnabled && styles.optionLabelActive,
+                          ]}
+                        >
+                          Aquatic features
+                        </Text>
+                        <Text style={styles.optionHint}>EPA water bodies and catchments — hides Habitats and NLC</Text>
                       </View>
                     </TouchableOpacity>
                   )}

@@ -77,6 +77,10 @@ const FIT_PADDING = { top: 30, right: 30, bottom: 30, left: 30 };
 
 const TOWNLANDS_STROKE = "#a855f7";
 
+// Site polygon colour — red so the preview card matches the fullscreen
+// map's site rendering. Same hex as colors.status.overdue.
+const SITE_RED = "#DC2626";
+
 // Skip-when-tiny threshold for habitat polygons in the preview. Same
 // rationale as the fullscreen map (project-map-screen.tsx) — polygons
 // smaller than ~6 px on screen are invisible noise that still cost a
@@ -514,13 +518,17 @@ export default function ProjectBoundaryPreview({ projectId, selectedSiteId, onPr
           const coords = polygonToCoordinates(site.boundary);
           if (coords.length === 0) return null;
           const isPrimary = selectedSiteId === null || site.id === selectedSiteId;
+          // Sites paint in red here too, matching the fullscreen map. The
+          // project-detail card and the fullscreen map are the same site
+          // boundary at different zooms — surveyors expect them to look
+          // identical so the "selected site" affordance carries across.
           return (
             <Polygon
               key={`${baseMap}-${site.id}`}
               coordinates={coords}
-              strokeColor={isPrimary ? colors.primary.DEFAULT : "#94a3b8"}
+              strokeColor={SITE_RED}
               strokeWidth={isPrimary ? 3 : 2}
-              fillColor={isPrimary ? colors.primary.DEFAULT + "33" : "transparent"}
+              fillColor={isPrimary ? `${SITE_RED}33` : "transparent"}
             />
           );
         })}

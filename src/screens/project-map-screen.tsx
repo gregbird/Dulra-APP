@@ -11,7 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import MapView, { Marker, Polygon, PROVIDER_DEFAULT, UrlTile, type MapPressEvent, type Region } from "react-native-maps";
+import MapView, { Marker, Polygon, Polyline, PROVIDER_DEFAULT, UrlTile, type MapPressEvent, type Region } from "react-native-maps";
 import { Paths } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -68,7 +68,7 @@ import {
   type NlcBbox,
   type NlcFeature,
 } from "@/lib/nlc";
-import { nlcColorFor } from "@/lib/nlc-colors";
+import { NLC_LEVEL2_TO_FOSSITT_CODE, nlcColorFor } from "@/lib/nlc-colors";
 import NlcDetailModal from "@/components/nlc-detail-modal";
 import { getFossittColor } from "@/lib/fossitt-utils";
 import { UNCLASSIFIED_HABITAT_COLOR, type HabitatPolygon } from "@/types/habitat";
@@ -78,12 +78,21 @@ import {
   loadMapLayerPrefs,
   resolveTileCachePath,
   resolveTileUrl,
+  saveAquaticPref,
   saveBaseMapPref,
   saveHabitatsPref,
   saveNlcPref,
   saveTownlandsPref,
   type BaseMapId,
 } from "@/lib/map-layers";
+import {
+  AQUATIC_COLORS,
+  aquaticLinePieces,
+  aquaticPolygonPieces,
+  classifyAquatic,
+  fetchAquaticFindings,
+} from "@/lib/aquatic";
+import type { AquaticFinding } from "@/types/aquatic";
 import {
   approximateZoom,
   bboxesRoughlyEqual,
@@ -107,6 +116,12 @@ const TILE_CACHE_PATH = `${Paths.cache.uri}map-tiles`;
 const TILE_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
 const TOWNLANDS_STROKE = "#a855f7";
+
+// Site polygon stroke / fill colour. Red so the surveyor's working
+// footprint stays unmistakable on top of any layer combination —
+// designated-site purple, NLC parcels, aquatic catchment indigo. Same
+// hex as colors.status.overdue so the design system stays consistent.
+const SITE_RED = "#DC2626";
 
 // Habitat polygons smaller than this many screen pixels at the current
 // zoom are skipped — they're invisible noise but each one still costs a
@@ -166,6 +181,7 @@ const VIEWPORT_FETCH_DEBOUNCE_MS = 400;
 // geometry is genuinely complex (e.g. estuarine sites). Same iOS
 // bridge cost equation as habitats: vertex count dominates.
 const DESIGNATED_MAX_VERTICES_PER_RING = Platform.OS === "ios" ? 96 : undefined;
+
 
 // Final overlay cap for designated polygons (post-MultiPolygon split).
 // Outlier projects sit near 50+ NPWS sites with several pieces each;
@@ -293,6 +309,16 @@ export default function ProjectMapScreen() {
   // async so the initial state may flip once `loadMapLayerPrefs`
   // resolves.
   const [nlcEnabled, setNlcEnabled] = useState(true);
+  // Aquatic features overlay (EPA water bodies + catchments). Mutually
+  // exclusive with habitats and NLC; the toggle handlers below enforce
+  // the mutex by flipping the other two off when aquatic comes on (and
+  // vice versa). Default off — pref is hydrated from SQLite asynchronously.
+  const [aquaticEnabled, setAquaticEnabled] = useState(false);
+  const [aquaticFindings, setAquaticFindings] = useState<AquaticFinding[]>([]);
+  // Tracks the project id we've already fetched aquatic data for in this
+  // mount, so toggling aquatic off and back on doesn't refire the network
+  // call. Resets on project change via the sibling effect below.
+  const aquaticFetchedRef = useRef<string | null>(null);
   const [habitats, setHabitats] = useState<HabitatPolygon[]>([]);
   const [selectedHabitat, setSelectedHabitat] = useState<HabitatPolygon | null>(null);
   // NLC reference parcels (z >= 16). Fetched per-viewport from the
@@ -332,8 +358,19 @@ export default function ProjectMapScreen() {
       if (cancelled) return;
       setBaseMap(prefs.baseMap);
       setTownlandsEnabled(prefs.townlandsEnabled);
-      setHabitatsEnabled(prefs.habitatsEnabled);
-      setNlcEnabled(prefs.nlcEnabled);
+      // Hydrate respecting the mutex: if a stale state somehow has aquatic
+      // *and* habitats both true (older builds, manual SQLite edit), prefer
+      // aquatic since it was the most recent toggle the user could have
+      // touched and matches what the layer panel will display.
+      if (prefs.aquaticEnabled) {
+        setAquaticEnabled(true);
+        setHabitatsEnabled(false);
+        setNlcEnabled(false);
+      } else {
+        setHabitatsEnabled(prefs.habitatsEnabled);
+        setNlcEnabled(prefs.nlcEnabled);
+        setAquaticEnabled(false);
+      }
     });
     return () => { cancelled = true; };
   }, []);
@@ -472,22 +509,33 @@ export default function ProjectMapScreen() {
     return null;
   }, [effectiveViewport, effectiveZoomDelta]);
 
-  type LayerMode = "none" | "habitats" | "nlc";
+  type LayerMode = "none" | "habitats" | "nlc" | "aquatic";
   const layerMode: LayerMode = useMemo(() => {
+    // Aquatic supersedes habitats / NLC (mutually exclusive in the panel).
+    // Aquatic geometries are coarse enough to read at every zoom — no
+    // floor like habitats/NLC have — so a single check trumps the rest.
+    if (aquaticEnabled) return "aquatic";
     if (!habitatsEnabled) return "none";
     if (currentZoom == null) return "none";
     if (currentZoom < MIN_HABITAT_RENDER_ZOOM) return "none";
     if (currentZoom < MIN_NLC_RENDER_ZOOM) return "habitats";
-    // z >= 16: NLC takes over when its toggle is on; otherwise we
-    // continue showing the saved-habitat layer so the user's own
-    // data stays visible at high zoom. Saved habitats at this zoom
-    // surface their 5 m server-side simplification as visible
-    // angular segments — that's the "triangle artifact" surveyors
-    // report. The proper fix requires a backend tolerance
-    // parameter on get_habitats_in_bbox (web team to action), not
-    // hiding the layer here.
-    return nlcEnabled ? "nlc" : "habitats";
-  }, [habitatsEnabled, nlcEnabled, currentZoom]);
+    // z >= 16: always render NLC parcels — same path as the web app,
+    // which drops saved geometry at this zoom and re-fetches NLC's
+    // sub-metre parcel boundaries from the Tailte Éireann FeatureServer.
+    // Saved habitats at parcel scale surface as visible angular
+    // fragments because cadastral imports decompose into hundreds of
+    // ~5-vertex parts (apro BL3: 606 disjoint parts) — the user's
+    // standing "üçgen artifact" complaint. NLC parcels are smooth and
+    // colour-coded by LEVEL_2_VALUE, which is the rendering surveyors
+    // actually want at this zoom. nlcEnabled toggle is preserved for
+    // the layer-control UI but no longer gates the high-zoom render —
+    // habitats-on at z >= 16 is enough.
+    return "nlc";
+    // nlcEnabled is intentionally omitted — at z >= 16 the high-zoom
+    // render is always NLC parcels regardless of toggle, so the toggle
+    // doesn't influence the active layer mode (only label visibility
+    // and similar UI affordances downstream).
+  }, [aquaticEnabled, habitatsEnabled, currentZoom]);
 
   // Skip viewport-driven fetches during the initial fitToCoordinates
   // animation (~1.5 s). iOS fires regionChangeComplete multiple times
@@ -923,15 +971,85 @@ export default function ProjectMapScreen() {
     saveTownlandsPref(enabled);
   };
 
+  // Helper: tear down aquatic state when the layer turns off. Called from
+  // every path that disables aquatic (direct toggle off + the mutex flips
+  // from habitats / NLC). The render memo gates on layerMode so empty
+  // findings should be redundant — but iOS' MKMapView occasionally lags
+  // the overlay-remove for a frame after a memo returns []. Clearing
+  // state guarantees the next render sees nothing to draw even if the
+  // bridge hasn't caught up. The fetch sentinel resets too so re-enabling
+  // aquatic later refreshes against the network instead of replaying a
+  // stale list.
+  const teardownAquatic = () => {
+    setAquaticFindings([]);
+    aquaticFetchedRef.current = null;
+  };
+
   const handleToggleHabitats = (enabled: boolean) => {
     setHabitatsEnabled(enabled);
     saveHabitatsPref(enabled);
+    // Mutex: turning habitats on takes the spot from aquatic. NLC stays
+    // independent — habitats and NLC can both be on (the layerMode picks
+    // the active one based on zoom).
+    if (enabled && aquaticEnabled) {
+      setAquaticEnabled(false);
+      saveAquaticPref(false);
+      teardownAquatic();
+    }
   };
 
   const handleToggleNlc = (enabled: boolean) => {
     setNlcEnabled(enabled);
     saveNlcPref(enabled);
+    if (enabled && aquaticEnabled) {
+      setAquaticEnabled(false);
+      saveAquaticPref(false);
+      teardownAquatic();
+    }
   };
+
+  const handleToggleAquatic = (enabled: boolean) => {
+    setAquaticEnabled(enabled);
+    saveAquaticPref(enabled);
+    // Aquatic flips off both other survey-data layers when it comes on
+    // (panel UI promises mutual exclusivity, and the render pipelines
+    // would race for the same zIndex slot otherwise). Both prefs persist
+    // so a session reload reflects the user's last visible choice.
+    if (enabled) {
+      if (habitatsEnabled) {
+        setHabitatsEnabled(false);
+        saveHabitatsPref(false);
+      }
+      if (nlcEnabled) {
+        setNlcEnabled(false);
+        saveNlcPref(false);
+      }
+    } else {
+      teardownAquatic();
+    }
+  };
+
+  // Fetch aquatic findings the first time the layer comes on for this
+  // project. Subsequent toggles within the same mount are free — the
+  // ref guards against re-firing the network call. fetchAquaticFindings
+  // already handles cache fallback, so an offline open returns last-
+  // known data without us having to branch here.
+  useEffect(() => {
+    if (!id || !aquaticEnabled) return;
+    if (aquaticFetchedRef.current === id) return;
+    aquaticFetchedRef.current = id;
+    fetchAquaticFindings(id)
+      .then((rows) => setAquaticFindings(rows))
+      .catch(() => { /* swallow — non-fatal layer */ });
+  }, [id, aquaticEnabled]);
+
+  // Reset the per-project fetch sentinel on project change. Without this,
+  // navigating from project A to project B with aquatic on would read A's
+  // findings against B's id (the effect above would short-circuit).
+  useEffect(() => {
+    aquaticFetchedRef.current = null;
+    setAquaticFindings([]);
+  }, [id]);
 
   // Per-habitat bbox span in degrees, computed once per habitats array.
   // Cheap (single sweep over each polygon's coordinates) and reused by
@@ -1195,11 +1313,25 @@ export default function ProjectMapScreen() {
         nlcPiecesCacheRef.current.set(feature.id, piecesWithBbox);
       }
       if (piecesWithBbox.length === 0) continue;
+      // Colour selection swings on the user's intent:
+      //  - nlcEnabled = false (habitats-only mode at high zoom) → render
+      //    the parcels with the surveyor's Fossitt palette, mapped from
+      //    LEVEL_2_VALUE so the colours stay consistent with the
+      //    saved-habitat layer's < 16 rendering.
+      //  - nlcEnabled = true (reference mode) → keep NLC's native
+      //    FeatureServer palette so the user can read the underlying
+      //    classification verbatim.
       // Color map is keyed by LEVEL_2_VALUE (server's human-readable
       // name), not LEVEL_2_ID. Web team flagged this during Phase 1
       // pre-flight — pass through verbatim, no normalisation, since
       // the FeatureServer returns inconsistent case across some values.
-      const fill = nlcColorFor(feature.level2Value);
+      const fill = nlcEnabled
+        ? nlcColorFor(feature.level2Value)
+        : getFossittColor(
+            feature.level2Value
+              ? (NLC_LEVEL2_TO_FOSSITT_CODE[feature.level2Value] ?? null)
+              : null,
+          );
       const stroke = darkenHex(fill, 0.65);
       for (let idx = 0; idx < piecesWithBbox.length; idx++) {
         if (out.length >= MAX_NLC_POLYGONS) {
@@ -1244,7 +1376,7 @@ export default function ProjectMapScreen() {
       );
     }
     return out;
-  }, [layerMode, nlcFeatures, polygonMountBudget, baseMap, effectiveViewport]);
+  }, [layerMode, nlcFeatures, polygonMountBudget, baseMap, effectiveViewport, nlcEnabled]);
 
   // NLC labels — anti-duplicate (max 1 per LEVEL_2_ID, the largest
   // polygon for that code) and capped at MAX_NLC_LABELS visible at
@@ -1257,13 +1389,28 @@ export default function ProjectMapScreen() {
     if (currentZoom == null || currentZoom < MIN_NLC_LABEL_ZOOM) return [];
     if (nlcFeatures.length === 0) return [];
 
-    // 1) Per LEVEL_2_ID, keep the feature with the largest area.
-    const largestPerCode = new Map<string, NlcFeature>();
+    // Label / dedupe key swing with the colour swing — when the user
+    // is in habitat-flavour mode (nlcEnabled = false) the parcels are
+    // painted with Fossitt colours, so the labels need to read as
+    // Fossitt codes (e.g. "WL1") not raw NLC LEVEL_2_IDs ("460").
+    // Multiple LEVEL_2_VALUEs can collapse onto one Fossitt code
+    // (Buildings + Other Artificial Surfaces + Ways → BL3), so we
+    // dedupe by the *label* itself, not by LEVEL_2_ID, otherwise the
+    // same Fossitt code would appear three times.
+    const labelOf = (feature: NlcFeature): string | null => {
+      if (nlcEnabled) return feature.level2Id;
+      if (!feature.level2Value) return null;
+      return NLC_LEVEL2_TO_FOSSITT_CODE[feature.level2Value] ?? null;
+    };
+
+    // 1) Per label, keep the feature with the largest area.
+    const largestPerLabel = new Map<string, NlcFeature>();
     for (const feature of nlcFeatures) {
-      if (!feature.level2Id) continue;
-      const existing = largestPerCode.get(feature.level2Id);
+      const label = labelOf(feature);
+      if (!label) continue;
+      const existing = largestPerLabel.get(label);
       if (!existing || (feature.area ?? 0) > (existing.area ?? 0)) {
-        largestPerCode.set(feature.level2Id, feature);
+        largestPerLabel.set(label, feature);
       }
     }
 
@@ -1272,8 +1419,9 @@ export default function ProjectMapScreen() {
     const candidates: Array<{
       feature: NlcFeature;
       anchor: { latitude: number; longitude: number };
+      label: string;
     }> = [];
-    for (const feature of largestPerCode.values()) {
+    for (const [label, feature] of largestPerLabel) {
       const cached = nlcPiecesCacheRef.current.get(feature.id);
       if (!cached || cached.length === 0) continue;
       // Pick the largest piece (longest outer ring as a cheap proxy)
@@ -1292,11 +1440,11 @@ export default function ProjectMapScreen() {
       }
       const anchor = centroidOfRing(largest.piece.outer);
       if (!anchor) continue;
-      candidates.push({ feature, anchor });
+      candidates.push({ feature, anchor, label });
     }
     candidates.sort((a, b) => (b.feature.area ?? 0) - (a.feature.area ?? 0));
     return candidates.slice(0, MAX_NLC_LABELS);
-  }, [layerMode, currentZoom, nlcFeatures, effectiveViewport]);
+  }, [layerMode, currentZoom, nlcFeatures, effectiveViewport, nlcEnabled]);
 
   // Same memoisation for designated polygons. NPWS sites can be huge
   // estuarine geometries with thousands of vertices and dozens of
@@ -1358,12 +1506,75 @@ export default function ProjectMapScreen() {
     return out;
   }, [designated, baseMap, polygonMountBudget, designatedPiecesCache]);
 
+  // Aquatic features render JSX. Polylines for rivers, polygons for lakes
+  // and catchments — colour bucket comes from classifyAquatic which
+  // splits on data_type + geometry shape. Passive layer: no tap, no
+  // detail sheet (per spec — sahada sadece haritada görünmesi yeterli).
+  // Mounts only when layerMode === "aquatic" so the existing habitat /
+  // NLC / designated render paths are untouched when the feature is off.
+  const aquaticElements = useMemo(() => {
+    if (layerMode !== "aquatic") return [];
+    const out: ReactElement[] = [];
+    for (const finding of aquaticFindings) {
+      if (!finding.geometry) continue;
+      const featureType = classifyAquatic(finding.data_type, finding.geometry);
+      const colour = AQUATIC_COLORS[featureType];
+      if (featureType === "river") {
+        const lines = aquaticLinePieces(finding.geometry);
+        for (let idx = 0; idx < lines.length; idx++) {
+          out.push(
+            <Polyline
+              key={`${baseMap}-aquatic-${finding.id}-line-${idx}`}
+              coordinates={lines[idx]}
+              strokeColor={colour.stroke}
+              strokeWidth={3}
+              zIndex={Z_HABITAT}
+            />,
+          );
+        }
+        continue;
+      }
+      const pieces = aquaticPolygonPieces(finding.geometry);
+      for (let idx = 0; idx < pieces.length; idx++) {
+        const piece = pieces[idx];
+        out.push(
+          <Polygon
+            key={`${baseMap}-aquatic-${finding.id}-poly-${idx}`}
+            coordinates={piece.outer}
+            holes={piece.holes.length > 0 ? piece.holes : undefined}
+            strokeColor={colour.stroke}
+            strokeWidth={2}
+            // Per-feature fill alpha lives in AQUATIC_COLORS — lakes paint
+            // heavier (contained water body), catchments paint as a faint
+            // tint so the satellite imagery underneath stays readable
+            // across km² of viewport. See AQUATIC_COLORS comment in
+            // lib/aquatic.ts for the per-bucket reasoning.
+            fillColor={`${colour.fill}${colour.fillAlpha}`}
+            zIndex={Z_HABITAT}
+          />,
+        );
+      }
+    }
+    return out;
+  }, [aquaticFindings, layerMode, baseMap]);
+
   // Site polygons (and the project-boundary fallback when there are no
   // sites). Memoised for the same reason as habitats/designated: any
   // unrelated state change (e.g. opening the layers panel, picking a
   // different site) used to rebuild this JSX inline, sending fresh
   // <Polygon> elements through the native bridge while the map is still
   // holding hundreds of habitat overlays.
+  //
+  // Keys carry `layerMode` for the same reason buffer rings do: on iOS
+  // MKMapView paints overlays in add-order (zIndex is ignored), so when
+  // habitat / aquatic / NLC polygons mount as a layer flips on, they
+  // land at the END of the overlay array — visually on TOP of the
+  // (older, never-remounted) site polygons. Surveyors then see the red
+  // site outline disappear under whatever fill the new layer brings.
+  // Including layerMode in the key forces React to unmount + remount
+  // every site whenever layerMode flips, re-adding them after the fresh
+  // habitat / aquatic polygons and restoring the "site stays on top"
+  // stack we want.
   const sitePolygonElements = useMemo(() => {
     if (!data) return [] as ReactElement[];
     const out: ReactElement[] = [];
@@ -1371,13 +1582,18 @@ export default function ProjectMapScreen() {
       const coords = polygonToCoordinates(site.boundary);
       if (coords.length === 0) continue;
       const isPrimary = selectedSiteId === null || site.id === selectedSiteId;
+      // Sites always paint in red so the surveyor's working footprint
+      // stays unmistakable across every layer combination — including
+      // when the aquatic catchment fill saturates underneath. Active /
+      // inactive distinction is carried by stroke width and fill alpha,
+      // not hue, so multi-site projects still show which one is selected.
       out.push(
         <Polygon
-          key={`${baseMap}-${site.id}`}
+          key={`${baseMap}-${layerMode}-${site.id}`}
           coordinates={coords}
-          strokeColor={isPrimary ? colors.primary.DEFAULT : "#94a3b8"}
+          strokeColor={SITE_RED}
           strokeWidth={isPrimary ? 3 : 1.5}
-          fillColor={isPrimary ? colors.primary.DEFAULT + "33" : "transparent"}
+          fillColor={isPrimary ? `${SITE_RED}33` : "transparent"}
           zIndex={Z_SITE_POLYGON}
         />,
       );
@@ -1387,7 +1603,7 @@ export default function ProjectMapScreen() {
       if (coords.length > 0) {
         out.push(
           <Polygon
-            key={`${baseMap}-boundary`}
+            key={`${baseMap}-${layerMode}-boundary`}
             coordinates={coords}
             strokeColor={colors.primary.DEFAULT}
             strokeWidth={3}
@@ -1398,7 +1614,7 @@ export default function ProjectMapScreen() {
       }
     }
     return out;
-  }, [data, selectedSiteId, baseMap]);
+  }, [data, selectedSiteId, baseMap, layerMode]);
 
   // Buffer rings around each site, matching the web map. Each site carries
   // its own buffer_distances (km); when null we fall back to the shared
@@ -1581,11 +1797,12 @@ export default function ProjectMapScreen() {
               {designatedPolygonElements}
               {habitatPolygonElements}
               {nlcPolygonElements}
+              {aquaticElements}
               {/* NLC LEVEL_2_ID labels — only at z >= 17, max 15
                   visible, deduped to one per code (largest polygon).
                   Markers are heavier than Polygons on the bridge so
                   we keep this list tight. */}
-              {nlcLabelMarkers.map(({ feature, anchor }) => (
+              {nlcLabelMarkers.map(({ feature, anchor, label }) => (
                 <Marker
                   key={`${baseMap}-nlc-label-${feature.id}`}
                   coordinate={anchor}
@@ -1593,22 +1810,34 @@ export default function ProjectMapScreen() {
                   tracksViewChanges={false}
                 >
                   <View style={styles.nlcLabel} pointerEvents="none">
-                    <Text style={styles.nlcLabelText}>{feature.level2Id}</Text>
+                    <Text style={styles.nlcLabelText}>{label}</Text>
                   </View>
                 </Marker>
               ))}
 
-              {/* Buffer rings. Painted after designated sites (per parity
-                  with web) so the dashed outline reads cleanly over NPWS
-                  fills. Fill is at ~5% alpha (0x0D) and the stroke uses
-                  lineDashPattern so concentric rings stay distinguishable
-                  even when they overlap. */}
+              {/* Buffer rings. Painted after every survey-data layer (per
+                  parity with web) so the dashed outline reads cleanly over
+                  NPWS, habitat AND aquatic fills. zIndex Z_BUFFER_RING (30)
+                  is above aquatic's Z_HABITAT (25) on Android; on iOS the
+                  add-order matters (zIndex is ignored), so the key carries
+                  layerMode — when the user flips between habitats /
+                  aquatic / NLC, every buffer ring's key changes, forcing
+                  React to unmount + remount them. The remount re-adds the
+                  rings to MKMapView's overlay array AFTER any newly
+                  mounted habitat / aquatic polygons, restoring the
+                  buffer-on-top stacking. Without this, switching from
+                  aquatic back to habitats would leave the freshly mounted
+                  habitat overlays on top of the (older, never-remounted)
+                  buffer rings — symptom: buffers vanish until the user
+                  pans the map. Stroke widened to 3 px because the aquatic
+                  catchment polygon at 40 % alpha would otherwise drown a
+                  2 px dashed line. */}
               {bufferRings.map((ring) => (
                 <Polygon
-                  key={`${baseMap}-${ring.key}`}
+                  key={`${baseMap}-${layerMode}-${ring.key}`}
                   coordinates={ring.coords}
                   strokeColor={ring.color}
-                  strokeWidth={2}
+                  strokeWidth={3}
                   fillColor={`${ring.color}0D`}
                   lineDashPattern={[5, 5]}
                   zIndex={Z_BUFFER_RING}
@@ -1648,6 +1877,8 @@ export default function ProjectMapScreen() {
               onToggleHabitats={handleToggleHabitats}
               nlcEnabled={nlcEnabled}
               onToggleNlc={handleToggleNlc}
+              aquaticEnabled={aquaticEnabled}
+              onToggleAquatic={handleToggleAquatic}
               visible={layersOpen}
               onOpen={() => setLayersOpen(true)}
               onClose={() => setLayersOpen(false)}

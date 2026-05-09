@@ -19,7 +19,8 @@ import { useNetworkStore } from "@/lib/network";
 import type { Survey } from "@/types/survey";
 import type { SurveyTemplate } from "@/types/survey-template";
 import type { ProjectSite } from "@/types/project";
-import { surveyTypeLabels, surveyStatusLabels } from "@/types/survey";
+import { surveyStatusLabels } from "@/types/survey";
+import { useSurveyTypeLabel } from "@/hooks/use-survey-type-label";
 
 const statusColors: Record<string, string> = {
   in_progress: colors.status.atRisk,
@@ -37,6 +38,7 @@ export default function SurveysListScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
+  const resolveSurveyTypeLabel = useSurveyTypeLabel();
 
   // Mirrors web (field-survey-step): single-site projects auto-pick the only
   // site; multi-site projects must have an explicit selection before the FAB
@@ -202,7 +204,7 @@ export default function SurveysListScreen() {
         <View style={styles.cardRow}>
           <View style={{ flex: 1 }}>
             <View style={styles.titleRow}>
-              <Text style={styles.cardTitle}>{surveyTypeLabels[item.survey_type] ?? item.survey_type}</Text>
+              <Text style={styles.cardTitle}>{resolveSurveyTypeLabel(item.survey_type)}</Text>
               {showVisitBadge && visitInfo && (
                 <View style={styles.visitBadge}>
                   <Text style={styles.visitBadgeText}>

@@ -348,7 +348,12 @@ export default function SurveyFormScreen() {
   }
 
   const sections = template?.default_fields?.sections?.filter((s) => s.enabled) ?? [];
-  const title = surveyTypeLabels[surveyType] ?? template?.name ?? "Survey";
+  // DB template name wins so admin-authored custom types (slugs like
+  // `custom_<hex>`) display their human label. Falls back to the
+  // hardcoded map for built-in types (in case the cache hasn't loaded
+  // yet on a cold open), and finally to a generic "Survey" so the
+  // header is never blank.
+  const title = template?.name ?? surveyTypeLabels[surveyType] ?? "Survey";
 
   if (!template || sections.length === 0) {
     return (

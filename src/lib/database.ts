@@ -200,6 +200,17 @@ async function initTables(database: SQLite.SQLiteDatabase) {
       cached_at TEXT NOT NULL
     );
 
+    -- Aquatic features (EPA water_quality + catchments) for the map layer.
+    -- Same project-scoped JSON blob shape as cached_designated_sites — the
+    -- payload per project is small (typically <50 findings) so we keep the
+    -- whole row set in one column. Excluded from clearCachedData() for the
+    -- same reason as the other geometry caches.
+    CREATE TABLE IF NOT EXISTS cached_aquatic_findings (
+      project_id TEXT PRIMARY KEY,
+      findings_json TEXT,
+      cached_at TEXT NOT NULL
+    );
+
     -- Habitat polygon geometry. Split from cached_habitats so the heavy
     -- ST_AsGeoJSON payload (typical 200 KB - 2 MB; outlier 11 MB) survives
     -- a metadata-only clearCachedData() pass. Keyed by (project_id, id) so
@@ -269,9 +280,12 @@ async function initTables(database: SQLite.SQLiteDatabase) {
     await database.runAsync(`UPDATE pending_photos SET retry_count = 0 WHERE retry_count IS NULL`);
   } catch { /* column may not exist on a very old schema — tryAddColumn above handles that */ }
 
-  if (currentVer < 13) {
+  // v14 — cached_aquatic_findings. CREATE TABLE IF NOT EXISTS above is
+  // idempotent so this is just a version bump for cache-busting old
+  // builds; no data transformation needed.
+  if (currentVer < 14) {
     await database.runAsync(`DELETE FROM db_version`);
-    await database.runAsync(`INSERT INTO db_version (version) VALUES (13)`);
+    await database.runAsync(`INSERT INTO db_version (version) VALUES (14)`);
   }
 }
 
@@ -686,6 +700,33 @@ export async function getCachedTemplate(surveyType: string): Promise<{
   );
 }
 
+/**
+ * Atomically replace the cached template list with the given rows. Used
+ * by the survey-type picker after a fresh online fetch — the source of
+ * truth is web's `survey_templates.is_active` toggle, so any cached row
+ * whose survey_type no longer appears in the active list must be dropped
+ * (otherwise the offline picker keeps showing types the org admin has
+ * disabled). `cacheTemplate` alone (INSERT OR REPLACE) can't do this
+ * because it never deletes orphans.
+ */
+export async function replaceCachedTemplates(rows: Array<{
+  surveyType: string;
+  name: string;
+  defaultFields: Record<string, unknown>;
+}>): Promise<void> {
+  const database = await getDatabase();
+  const now = new Date().toISOString();
+  await database.withTransactionAsync(async () => {
+    await database.runAsync(`DELETE FROM cached_templates`);
+    for (const row of rows) {
+      await database.runAsync(
+        `INSERT OR REPLACE INTO cached_templates (survey_type, name, default_fields, cached_at) VALUES (?, ?, ?, ?)`,
+        row.surveyType, row.name, JSON.stringify(row.defaultFields), now,
+      );
+    }
+  });
+}
+
 export async function cacheSurvey(params: {
   id: string;
   projectId: string;
@@ -804,6 +845,27 @@ export async function getCachedDesignatedSites(projectId: string): Promise<{
   const database = await getDatabase();
   return database.getFirstAsync(
     `SELECT sites_geojson FROM cached_designated_sites WHERE project_id = ?`,
+    projectId,
+  );
+}
+
+export async function setCachedAquaticFindings(params: {
+  projectId: string;
+  findingsJson: string | null;
+}): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `INSERT OR REPLACE INTO cached_aquatic_findings (project_id, findings_json, cached_at) VALUES (?, ?, ?)`,
+    params.projectId, params.findingsJson, new Date().toISOString(),
+  );
+}
+
+export async function getCachedAquaticFindings(projectId: string): Promise<{
+  findings_json: string | null;
+} | null> {
+  const database = await getDatabase();
+  return database.getFirstAsync(
+    `SELECT findings_json FROM cached_aquatic_findings WHERE project_id = ?`,
     projectId,
   );
 }
