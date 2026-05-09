@@ -92,3 +92,70 @@ export function nlcColorFor(level2Value: string | null | undefined): string {
   if (!level2Value) return NLC_FALLBACK_COLOR;
   return NLC_LEVEL2_COLORS[level2Value] ?? NLC_FALLBACK_COLOR;
 }
+
+/**
+ * NLC LEVEL_2_VALUE → Fossitt code mapping.
+ *
+ * When the user has the Habitats layer on at z >= 16 (and NLC's own
+ * toggle is the secondary control), the rendering swaps from saved
+ * cadastral geometry to live NLC parcels — but the surveyor still
+ * thinks of these as "their habitat data". So we colour the parcels
+ * with the Fossitt palette they already see at z < 16, not NLC's
+ * native FeatureServer palette. The mapping picks the closest Fossitt
+ * code for each LEVEL_2_VALUE and `getFossittColor` then resolves
+ * along the parent chain (e.g. PB4 → PB → P) for consistent fills.
+ *
+ * Mapping rationale:
+ *  - 1:1 where Fossitt has the same concept (Hedgerows → WL1).
+ *  - Parent code where Fossitt has multiple sub-types (Lakes and
+ *    Ponds → FL, not a specific FL1/FL2/...).
+ *  - Closest semantic match where the taxonomies don't line up cleanly
+ *    (e.g. Bare Peat → PB5 "eroding blanket bog", Burnt Areas → ED).
+ *
+ * Codes verified against fossitt-codes.json — every value here
+ * resolves to a non-fallback colour via getFossittColor().
+ */
+export const NLC_LEVEL2_TO_FOSSITT_CODE: Record<string, string> = {
+  // Grasslands
+  "Amenity Grassland": "GA2",
+  "Improved Grassland": "GA1",
+  "Wet Grassland": "GS4",
+  "Dry Grassland": "GS3",
+  "Cultivated Land": "BC",
+  // Woodlands / scrub / bracken
+  "Broadleaved Forest and Woodland": "WN",
+  "Coniferous Forest": "WD",
+  "Mixed Forest": "WD2",
+  "Transitional Forest": "WS",
+  Hedgerows: "WL1",
+  Treelines: "WL2",
+  Scrub: "WS",
+  Bracken: "HD1",
+  // Peatlands / heaths
+  "Blanket Bog": "PB3",
+  "Raised Bog": "PB1",
+  "Cutover Bog": "PB4",
+  "Bare Peat": "PB5",
+  Fens: "PF",
+  "Dry Heath": "HH1",
+  "Wet Heath": "HH3",
+  // Waterbodies
+  "Lakes and Ponds": "FL",
+  "Rivers and Streams": "FW",
+  "Artificial Waterbodies": "FL8",
+  "Marine Water": "MW",
+  "Transitional Waterbodies": "CW2",
+  // Coast / marine sediments
+  "Coastal Sediments": "LS",
+  Mudflats: "LS4",
+  "Salt Marsh": "CM",
+  "Sand Dunes": "CD",
+  Swamp: "FS",
+  "Exposed Rock and Sediments": "ER",
+  // Built / disturbed
+  Buildings: "BL3",
+  "Other Artificial Surfaces": "BL3",
+  Ways: "BL3",
+  "Bare Soil and Disturbed Ground": "ED2",
+  "Burnt Areas": "ED",
+};
