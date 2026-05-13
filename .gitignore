@@ -37,6 +37,9 @@ yarn-error.*
 # Claude Code
 .claude/
 
+# Local screenshots / assets that shouldn't be committed
+ss-nocommit/
+
 # typescript
 *.tsbuildinfo
 

@@ -4,7 +4,7 @@ import { Stack, useRouter, useSegments } from "expo-router";
 import { Session } from "@supabase/supabase-js";
 import { supabase, setupTokenRefresh } from "@/lib/supabase";
 import { colors } from "@/constants/colors";
-import DevTool from "@/components/dev-tool";
+// import DevTool from "@/components/dev-tool";
 import WatermarkEngine from "@/components/watermark-engine";
 import SyncIndicator from "@/components/sync-indicator";
 import LocationPermissionModal from "@/components/location-permission-modal";
@@ -212,7 +212,7 @@ export default function RootLayout() {
         visible={locationPromptVisible}
         onClose={handleLocationPromptClose}
       />
-      {__DEV__ && <DevTool />}
+      {/* {__DEV__ && <DevTool />} */}
     </View>
   );
 }
