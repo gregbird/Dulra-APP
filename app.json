@@ -15,7 +15,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.dulra.dulradev",
+      "bundleIdentifier": "com.dulra.glasfuture",
       "infoPlist": {
         "NSCameraUsageDescription": "Take photos of species, habitats, and survey sites to include in your field records.",
         "NSLocationWhenInUseUsageDescription": "Your location is recorded with each observation so survey data can be mapped accurately.",
@@ -29,7 +29,7 @@
         "foregroundImage": "./assets/dulra_logo.png",
         "monochromeImage": "./assets/dulra_logo.png"
       },
-      "package": "com.dulra.dulradev",
+      "package": "com.dulra.glasfuture",
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.CAMERA",
