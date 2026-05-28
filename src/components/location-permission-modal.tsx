@@ -40,14 +40,16 @@ export default function LocationPermissionModal({
     const next = await requestPermission();
     setStatus(next);
     setWorking(false);
-    if (next === "granted") onClose();
+    // Apple 5.1.1(iv): the pre-prompt screen must always lead to the system
+    // dialog and may not offer an exit. Close the modal whatever the user
+    // chose in the system prompt — denied users land on the in-app flow with
+    // a graceful "no GPS" fallback (manual coords) until they re-open this
+    // modal from Settings.
+    onClose();
   };
 
   const handleOpenSettings = async () => {
     await openLocationSettings();
-    // We don't auto-close here — when the user returns to the app, the
-    // useLocation hook's AppState listener refreshes status. They can dismiss
-    // the modal manually with "Maybe later" if they didn't change the setting.
   };
 
   const renderUndetermined = () => (
@@ -69,11 +71,8 @@ export default function LocationPermissionModal({
         {working ? (
           <ActivityIndicator color={colors.white} />
         ) : (
-          <Text style={styles.primaryButtonText}>Allow Location</Text>
+          <Text style={styles.primaryButtonText}>Continue</Text>
         )}
-      </TouchableOpacity>
-      <TouchableOpacity style={styles.secondaryButton} onPress={onClose} activeOpacity={0.6}>
-        <Text style={styles.secondaryButtonText}>Maybe later</Text>
       </TouchableOpacity>
     </>
   );
@@ -93,7 +92,7 @@ export default function LocationPermissionModal({
         <Text style={styles.primaryButtonText}>Open Settings</Text>
       </TouchableOpacity>
       <TouchableOpacity style={styles.secondaryButton} onPress={onClose} activeOpacity={0.6}>
-        <Text style={styles.secondaryButtonText}>Maybe later</Text>
+        <Text style={styles.secondaryButtonText}>Close</Text>
       </TouchableOpacity>
     </>
   );

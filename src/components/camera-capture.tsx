@@ -7,7 +7,7 @@ import {
   Modal,
   SafeAreaView,
   ActivityIndicator,
-  Alert,
+  Linking,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { Ionicons } from "@expo/vector-icons";
@@ -47,25 +47,50 @@ export default function CameraCapture({ visible, onClose, onCapture }: CameraCap
     }
 
     if (!permission.granted) {
-      const handleAllow = async () => {
-        const result = await requestPermission();
-        if (!result.granted) {
-          Alert.alert(
-            "Camera Access Denied",
-            "Please enable camera access in Settings to take photos.",
-            [{ text: "OK", onPress: onClose }]
-          );
-        }
+      // Apple 5.1.1(iv): the pre-permission screen must use neutral wording
+      // ("Continue") and must always proceed to the system prompt — no skip
+      // button. Once iOS has denied (canAskAgain=false), the system prompt
+      // won't show again, so we route the user to Settings instead.
+      const previouslyDenied = !permission.canAskAgain;
+
+      const handleContinue = async () => {
+        await requestPermission();
+      };
+
+      const handleOpenSettings = async () => {
+        await Linking.openSettings();
       };
 
       return (
-        <View style={styles.center}>
+        <SafeAreaView style={styles.center}>
+          {/* Close button only when the user has already made a permission
+              choice (canAskAgain=false). Apple 5.1.1(iv) forbids any "skip"
+              affordance on the first pre-permission screen. */}
+          {previouslyDenied && (
+            <TouchableOpacity
+              style={styles.permClose}
+              onPress={onClose}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Ionicons name="close" size={28} color={colors.white} />
+            </TouchableOpacity>
+          )}
           <Ionicons name="camera-outline" size={56} color={colors.white} />
-          <Text style={styles.permText}>Camera access is required to take photos</Text>
-          <TouchableOpacity style={styles.permButton} onPress={handleAllow} activeOpacity={0.8}>
-            <Text style={styles.permButtonText}>Allow Camera</Text>
+          <Text style={styles.permText}>
+            {previouslyDenied
+              ? "Camera access is turned off. Open Settings to enable it for Dulra."
+              : "Dulra needs camera access to capture watermarked field photos."}
+          </Text>
+          <TouchableOpacity
+            style={styles.permButton}
+            onPress={previouslyDenied ? handleOpenSettings : handleContinue}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.permButtonText}>
+              {previouslyDenied ? "Open Settings" : "Continue"}
+            </Text>
           </TouchableOpacity>
-        </View>
+        </SafeAreaView>
       );
     }
 
@@ -121,6 +146,7 @@ export default function CameraCapture({ visible, onClose, onCapture }: CameraCap
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#000" },
   center: { flex: 1, justifyContent: "center", alignItems: "center", padding: 32, gap: 16 },
+  permClose: { position: "absolute", top: 16, left: 16, padding: 8 },
   permText: { fontSize: 18, color: colors.white, textAlign: "center", lineHeight: 26 },
   permButton: {
     backgroundColor: colors.primary.DEFAULT, paddingHorizontal: 28,
